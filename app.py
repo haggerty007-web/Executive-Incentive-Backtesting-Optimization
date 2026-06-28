@@ -414,7 +414,7 @@ def consultant_potential_metric_analysis(candidate_df, score_df=None, existing_p
             next_step = "Include in Evidence Engine"
         else:
             status = "Needs annual values"
-            next_step = "Collect 10-year annual history, then test TSR/payout correlation"
+            next_step = "Paste annual values in 2A, then test TSR/payout correlation"
 
         if candidate_score >= 80:
             priority = "High"
@@ -587,6 +587,34 @@ def merge_data(perf, payout, value, perf_year, payout_year, value_year):
     out = a.merge(b, on="Year", how="inner", suffixes=("", "_payout"))
     out = out.merge(c, on="Year", how="inner", suffixes=("", "_value"))
     return out.sort_values("Year")
+
+
+def merge_candidate_values_into_performance(perf_df, perf_year, candidate_df):
+    """Merge a CAPIQ/company candidate metric annual values table into the performance dataset."""
+    if candidate_df is None or candidate_df.empty:
+        return perf_df.copy()
+    base = perf_df.copy()
+    extra = candidate_df.copy()
+
+    # Identify year column in candidate table
+    extra_year = infer_year_col(extra)
+    if extra_year is None:
+        return base
+
+    base["Year"] = standardize_year(base[perf_year])
+    extra["Year"] = standardize_year(extra[extra_year])
+    base = base.dropna(subset=["Year"])
+    extra = extra.dropna(subset=["Year"])
+    base["Year"] = base["Year"].astype(int)
+    extra["Year"] = extra["Year"].astype(int)
+
+    # Drop duplicate original candidate year column if it is not literally Year
+    if extra_year != "Year" and extra_year in extra.columns:
+        extra = extra.drop(columns=[extra_year])
+
+    merged = base.merge(extra, on="Year", how="left", suffixes=("", "_candidate"))
+    return merged
+
 
 def safe_corr(x, y):
     valid = pd.concat([x, y], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
@@ -795,7 +823,7 @@ def assess_new_metric_candidates(potential_df, existing_metrics):
 
         if assessment_score >= 80:
             priority = "High"
-            recommendation = "Collect annual values and test against TSR"
+            recommendation = "Paste annual values in 2A and test against TSR"
         elif assessment_score >= 65:
             priority = "Medium"
             recommendation = "Review with consultant; collect values if strategically relevant"
@@ -880,6 +908,7 @@ workflow = st.sidebar.radio(
     [
         "1. Import Data",
         "2. Management Metrics",
+        "2A. Candidate Metric Values",
         "3. Company DNA",
         "4. Evidence Engine",
         "5. Design Lab",
@@ -1110,6 +1139,75 @@ elif workflow == "2. Management Metrics":
             download_df_button(curated, "Download curated metric library", "curated_management_metric_library.csv")
 
 # -----------------------------
+# 2A. Candidate Metric Values
+# -----------------------------
+
+elif workflow == "2A. Candidate Metric Values":
+    st.header("2A. Candidate Metric Annual Values")
+    st.info(
+        "Use this section to paste or upload annual values for potential new metrics identified from 10-Ks/investor materials. "
+        "Capital IQ, company financials, or a manually prepared table all work. This is what allows the app to actually test new metrics against TSR and payouts."
+    )
+
+    st.markdown("""
+**Recommended format**
+
+```text
+Year    Revenue    Net Sales    Pricing    Cost Savings    Productivity Savings    Leverage Ratio
+2025    ...
+2024    ...
+2023    ...
+```
+
+Use one row per year and one column per candidate metric. These values will be merged into the performance dataset by Year.
+""")
+
+    method = st.radio("Input method", ["Paste from Excel / Capital IQ", "Upload CSV/XLSX", "Use blank template"], horizontal=True, key="candidate_values_method")
+
+    candidate_df = pd.DataFrame()
+    if method == "Paste from Excel / Capital IQ":
+        txt = st.text_area("Paste annual values for candidate metrics here", height=240, key="candidate_values_txt")
+        candidate_df = parse_pasted_table(txt)
+    elif method == "Upload CSV/XLSX":
+        file = st.file_uploader("Upload candidate metric values", type=["csv", "xlsx", "xls"], key="candidate_values_file")
+        candidate_df = read_upload_table(file)
+    else:
+        # Build a blank template from management metrics and imported years if available.
+        years = []
+        if not st.session_state.perf_df.empty:
+            ycol = infer_year_col(st.session_state.perf_df)
+            if ycol:
+                years = sorted(standardize_year(st.session_state.perf_df[ycol]).dropna().astype(int).unique().tolist())
+        if not years:
+            years = list(range(2016, 2026))
+        metrics = []
+        if not st.session_state.mgmt_df.empty and "Metric" in st.session_state.mgmt_df.columns:
+            metrics = st.session_state.mgmt_df["Metric"].dropna().astype(str).head(12).tolist()
+        if not metrics:
+            metrics = ["Revenue", "Net Sales", "Pricing", "Cost Savings", "Productivity Savings", "Leverage Ratio"]
+        candidate_df = pd.DataFrame({"Year": years})
+        for m in metrics:
+            candidate_df[m] = ""
+
+    if not candidate_df.empty:
+        st.success(f"Loaded {len(candidate_df)} rows and {len(candidate_df.columns)} columns.")
+        edited_candidate_df = st.data_editor(candidate_df, use_container_width=True, num_rows="dynamic", key="candidate_values_editor")
+        st.session_state.candidate_values_df = edited_candidate_df
+        download_df_button(edited_candidate_df, "Download candidate metric values", "candidate_metric_values.csv")
+
+        st.subheader("Candidate metrics now available for testing")
+        ycol = infer_year_col(edited_candidate_df)
+        metrics_available = [c for c in edited_candidate_df.columns if c != ycol]
+        st.write(", ".join(metrics_available) if metrics_available else "No metric columns found.")
+
+        st.success(
+            "Next: go to Company DNA. These candidate metrics will be merged into the performance dataset and will appear in the correlation selection list."
+        )
+    else:
+        st.warning("Paste or upload a candidate metric annual values table to continue.")
+
+
+# -----------------------------
 # 3. Company DNA
 # -----------------------------
 
@@ -1140,6 +1238,12 @@ elif workflow == "3. Company DNA":
         perf_df = merge_performance_with_extracted_values(perf_df, perf_year, st.session_state.extracted_values_wide_df)
         st.success("Extracted/manual annual metric values have been added to the performance dataset for testing.")
         with st.expander("Performance dataset after adding extracted metric values"):
+            st.dataframe(perf_df, use_container_width=True)
+
+    if "candidate_values_df" in st.session_state and not st.session_state.candidate_values_df.empty:
+        perf_df = merge_candidate_values_into_performance(perf_df, perf_year, st.session_state.candidate_values_df)
+        st.success("Candidate metric annual values have been merged into the performance dataset.")
+        with st.expander("Performance dataset after adding candidate metric annual values"):
             st.dataframe(perf_df, use_container_width=True)
 
     perf_cols = [c for c in perf_df.columns if c != perf_year and c != "Year"]
