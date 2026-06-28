@@ -147,6 +147,206 @@ def extract_text_from_pdf(file):
         st.warning(f"Could not read PDF text: {e}")
     return text
 
+
+def extract_pdf_tables(file):
+    """Extract tables from a PDF using pdfplumber. Returns a list of DataFrames."""
+    tables = []
+    try:
+        import pdfplumber
+        with pdfplumber.open(file) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                page_tables = page.extract_tables() or []
+                for t_idx, table in enumerate(page_tables, start=1):
+                    if not table or len(table) < 2:
+                        continue
+                    # Normalize rows
+                    cleaned = []
+                    max_len = max(len(r) for r in table if r)
+                    for r in table:
+                        if not r:
+                            continue
+                        rr = [(c or "").strip() for c in r]
+                        rr += [""] * (max_len - len(rr))
+                        cleaned.append(rr)
+                    if len(cleaned) < 2:
+                        continue
+                    df = pd.DataFrame(cleaned)
+                    df.attrs["page"] = page_num
+                    df.attrs["table"] = t_idx
+                    tables.append(df)
+    except Exception as e:
+        st.warning(f"Could not extract PDF tables with pdfplumber: {e}")
+    return tables
+
+def find_years_in_cells(cells):
+    years = []
+    for i, cell in enumerate(cells):
+        s = str(cell)
+        found = re.findall(r"(?:19|20)\d{2}", s)
+        if found:
+            # if multiple years in one cell, take each, but preserve cell index
+            for y in found:
+                years.append((i, int(y)))
+    return years
+
+def normalize_metric_label(label):
+    s = str(label).strip()
+    s = re.sub(r"\s+", " ", s)
+    s = s.replace(":", "")
+    return s
+
+def row_looks_like_metric(row, selected_terms):
+    label = " ".join([str(x) for x in row[:3]]).lower()
+    for term in selected_terms:
+        if str(term).lower() in label or label in str(term).lower():
+            return term
+    return None
+
+def extract_metric_values_from_tables(tables, selected_metrics):
+    """Attempt to convert PDF tables into long-form metric/year/value records."""
+    records = []
+    selected_terms = [str(m) for m in selected_metrics if str(m).strip()]
+    if not selected_terms:
+        return pd.DataFrame()
+
+    for df in tables:
+        page = df.attrs.get("page", "")
+        table_no = df.attrs.get("table", "")
+
+        # Find a row that contains year headers.
+        header_idx = None
+        header_years = []
+        for idx in range(min(len(df), 8)):
+            yrs = find_years_in_cells(df.iloc[idx].tolist())
+            if len(yrs) >= 2:
+                header_idx = idx
+                header_years = yrs
+                break
+
+        if header_idx is None:
+            # Also check all rows, because some annual report tables have years lower down.
+            for idx in range(len(df)):
+                yrs = find_years_in_cells(df.iloc[idx].tolist())
+                if len(yrs) >= 2:
+                    header_idx = idx
+                    header_years = yrs
+                    break
+
+        if header_idx is None or len(header_years) < 2:
+            continue
+
+        # Analyze rows below the header for selected metric labels.
+        for ridx in range(header_idx + 1, len(df)):
+            row = df.iloc[ridx].tolist()
+            metric_match = row_looks_like_metric(row, selected_terms)
+            if not metric_match:
+                continue
+
+            label = normalize_metric_label(" ".join([str(x) for x in row[:3] if str(x).strip()]))
+            for col_idx, year in header_years:
+                if col_idx >= len(row):
+                    continue
+                val = clean_num(row[col_idx])
+                if pd.notna(val):
+                    records.append({
+                        "Metric": metric_match,
+                        "Year": int(year),
+                        "Extracted Value": val,
+                        "Source Label": label,
+                        "Source Page": page,
+                        "Source Table": table_no,
+                        "Confidence": "Table match - review"
+                    })
+
+    if not records:
+        return pd.DataFrame()
+    out = pd.DataFrame(records)
+    out = out.drop_duplicates(subset=["Metric", "Year"], keep="first")
+    return out.sort_values(["Metric", "Year"])
+
+def extract_metric_values_from_text_blocks(text, selected_metrics):
+    """Fallback extraction from raw text. Useful when tables are not detected."""
+    records = []
+    selected_terms = [str(m) for m in selected_metrics if str(m).strip()]
+    if not text or not selected_terms:
+        return pd.DataFrame()
+
+    for metric in selected_terms:
+        pattern = re.compile(re.escape(metric), re.IGNORECASE)
+        for m in pattern.finditer(text):
+            window = text[max(0, m.start()-600): min(len(text), m.end()+1600)]
+            years = re.findall(r"(?:19|20)\d{2}", window)
+            if len(years) < 2:
+                continue
+
+            # Look for common table-like number runs after metric mention.
+            nums = re.findall(r"\(?\$?-?\d{1,3}(?:,\d{3})*(?:\.\d+)?%?\)?", window)
+            cleaned_nums = []
+            for n in nums:
+                v = clean_num(n)
+                if pd.notna(v):
+                    cleaned_nums.append(v)
+
+            # Filter years out of values where possible
+            cleaned_nums = [v for v in cleaned_nums if not (1900 <= v <= 2100)]
+            if len(cleaned_nums) < len(set(years[:10])):
+                continue
+
+            unique_years = []
+            for y in years:
+                yy = int(y)
+                if yy not in unique_years:
+                    unique_years.append(yy)
+
+            # Use first N values as a review-only estimate.
+            for y, v in zip(unique_years[:10], cleaned_nums[:10]):
+                records.append({
+                    "Metric": metric,
+                    "Year": int(y),
+                    "Extracted Value": v,
+                    "Source Label": "Text block near metric mention",
+                    "Source Page": "",
+                    "Source Table": "",
+                    "Confidence": "Text match - low confidence review"
+                })
+            break
+
+    if not records:
+        return pd.DataFrame()
+    out = pd.DataFrame(records).drop_duplicates(subset=["Metric", "Year"], keep="first")
+    return out.sort_values(["Metric", "Year"])
+
+def pivot_extracted_values(extracted_values_df):
+    """Convert reviewed long-form extracted values into a wide Year-by-metric table."""
+    if extracted_values_df is None or extracted_values_df.empty:
+        return pd.DataFrame()
+    df = extracted_values_df.copy()
+    if not {"Metric", "Year", "Extracted Value"}.issubset(df.columns):
+        return pd.DataFrame()
+    df["Year"] = standardize_year(df["Year"])
+    df["Extracted Value"] = pd.to_numeric(df["Extracted Value"].map(clean_num), errors="coerce")
+    df = df.dropna(subset=["Year", "Extracted Value"])
+    df["Year"] = df["Year"].astype(int)
+    wide = df.pivot_table(index="Year", columns="Metric", values="Extracted Value", aggfunc="first").reset_index()
+    wide.columns = [str(c) for c in wide.columns]
+    return wide
+
+def merge_performance_with_extracted_values(perf_df, perf_year, extracted_wide):
+    """Add extracted metric value series to the performance data by Year."""
+    if extracted_wide is None or extracted_wide.empty:
+        return perf_df.copy()
+    base = perf_df.copy()
+    base["Year"] = standardize_year(base[perf_year])
+    base = base.dropna(subset=["Year"])
+    base["Year"] = base["Year"].astype(int)
+    extra = extracted_wide.copy()
+    extra["Year"] = standardize_year(extra["Year"])
+    extra = extra.dropna(subset=["Year"])
+    extra["Year"] = extra["Year"].astype(int)
+    merged = base.merge(extra, on="Year", how="left", suffixes=("", "_extracted"))
+    return merged
+
+
 def extract_text_from_docx(file):
     text = ""
     try:
@@ -529,7 +729,7 @@ def sample_value():
 # Session state
 # -----------------------------
 
-for key in ["perf_df", "payout_df", "value_df", "mgmt_df", "model_df", "score_df", "selected_metrics"]:
+for key in ["perf_df", "payout_df", "value_df", "mgmt_df", "model_df", "score_df", "extracted_values_df", "extracted_values_wide_df", "selected_metrics"]:
     if key not in st.session_state:
         st.session_state[key] = pd.DataFrame() if key.endswith("_df") else []
 
@@ -698,19 +898,55 @@ elif workflow == "2. Management Metrics":
                 )
                 download_df_button(edited_extracted, "Download extracted metric library", "management_metric_library.csv")
 
-                with st.expander("Experimental value extraction"):
+                with st.expander("Extract Annual Metric Values from 10-K Tables", expanded=True):
+                    st.caption(
+                        "This step attempts to pull year-by-year financial values from 10-K tables. "
+                        "Review carefully before using. Annual values are required before new metrics can be tested against TSR."
+                    )
                     selected_extract = st.multiselect(
                         "Metrics to attempt value extraction",
                         edited_extracted["Metric"].tolist(),
-                        default=edited_extracted["Metric"].head(min(5, len(edited_extracted))).tolist()
+                        default=edited_extracted["Metric"].head(min(8, len(edited_extracted))).tolist()
                     )
-                    if st.button("Extract historical values for review"):
-                        values = extract_candidate_financial_values(extracted_text, selected_extract)
+                    if st.button("Extract annual values from uploaded documents"):
+                        all_tables = []
+                        # Re-read uploaded files for table extraction. Text extraction above consumes TXT files, but not PDF/DOCX table files.
+                        for f in docs:
+                            try:
+                                f.seek(0)
+                            except Exception:
+                                pass
+                            if f.name.lower().endswith(".pdf"):
+                                all_tables.extend(extract_pdf_tables(f))
+
+                        table_values = extract_metric_values_from_tables(all_tables, selected_extract)
+                        text_values = extract_metric_values_from_text_blocks(extracted_text, selected_extract)
+
+                        values = pd.concat([table_values, text_values], ignore_index=True) if not table_values.empty or not text_values.empty else pd.DataFrame()
                         if values.empty:
-                            st.warning("No reliable historical values found. Use the extracted metric names and paste/upload values manually.")
+                            st.warning("No annual values were found. Try adding a pasted annual values table below or use the downloadable template from Company DNA.")
                         else:
-                            st.dataframe(values, use_container_width=True)
-                            download_df_button(values, "Download extracted values", "extracted_metric_values_review.csv")
+                            st.success(f"Found {len(values)} metric-year values. Review and edit before using.")
+                            reviewed = st.data_editor(values, use_container_width=True, num_rows="dynamic", key="review_extracted_values")
+                            st.session_state.extracted_values_df = reviewed
+                            wide = pivot_extracted_values(reviewed)
+                            st.session_state.extracted_values_wide_df = wide
+                            st.markdown("**Wide table that will be added to the performance dataset:**")
+                            st.dataframe(wide, use_container_width=True)
+                            download_df_button(reviewed, "Download extracted values for review", "extracted_metric_values_review.csv")
+                            download_df_button(wide, "Download extracted values wide table", "extracted_metric_values_wide.csv")
+
+                    st.markdown("**Optional manual annual values paste**")
+                    manual_values_txt = st.text_area(
+                        "Paste annual values for new metrics here. Format: Year plus one column per metric.",
+                        height=120,
+                        key="manual_extracted_values_txt"
+                    )
+                    manual_values = parse_pasted_table(manual_values_txt)
+                    if not manual_values.empty:
+                        st.session_state.extracted_values_wide_df = manual_values
+                        st.success("Manual annual values table loaded and will be merged into the performance dataset.")
+                        st.dataframe(manual_values, use_container_width=True)
         else:
             edited_extracted = pd.DataFrame()
 
@@ -763,7 +999,14 @@ elif workflow == "3. Company DNA":
     with c3:
         value_year = st.selectbox("Shareholder value year column", value_df.columns, index=list(value_df.columns).index(infer_year_col(value_df)) if infer_year_col(value_df) in value_df.columns else 0)
 
-    perf_cols = [c for c in perf_df.columns if c != perf_year]
+    # If annual values were extracted from 10-K tables or manually pasted, merge them into performance data.
+    if "extracted_values_wide_df" in st.session_state and not st.session_state.extracted_values_wide_df.empty:
+        perf_df = merge_performance_with_extracted_values(perf_df, perf_year, st.session_state.extracted_values_wide_df)
+        st.success("Extracted/manual annual metric values have been added to the performance dataset for testing.")
+        with st.expander("Performance dataset after adding extracted metric values"):
+            st.dataframe(perf_df, use_container_width=True)
+
+    perf_cols = [c for c in perf_df.columns if c != perf_year and c != "Year"]
     payout_cols = [c for c in payout_df.columns if c != payout_year]
     value_cols = [c for c in value_df.columns if c != value_year]
 
@@ -797,7 +1040,7 @@ elif workflow == "3. Company DNA":
     candidate_df = pd.DataFrame(all_candidates)
     if not candidate_df.empty:
         st.subheader("Metric Discovery Crosswalk")
-        st.caption("This shows the metrics found in 10-Ks/investor communications and whether the app has annual values needed to test TSR correlation.")
+        st.caption("This shows metrics found in 10-Ks/investor communications and whether annual values are available. Once values are extracted or pasted, those metrics become analyzable.")
         st.dataframe(candidate_df, use_container_width=True)
         missing_values = candidate_df[(candidate_df["Source"] == "10-K / investor communications") & (~candidate_df["Has Historical Values"])]
         if not missing_values.empty:
