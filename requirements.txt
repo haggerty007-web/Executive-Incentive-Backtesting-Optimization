@@ -8,3 +8,4 @@ scipy
 statsmodels
 pypdf
 python-docx
+pdfplumber
