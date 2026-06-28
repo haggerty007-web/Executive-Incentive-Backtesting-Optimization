@@ -354,6 +354,108 @@ def capiq_export_fields(mapping_df):
     return pd.DataFrame({"Capital IQ Field": unique})
 
 
+def find_existing_column_case_insensitive(df, col_name):
+    """Return actual dataframe column matching col_name, ignoring case and duplicate suffixes."""
+    target = str(col_name).lower()
+    for c in df.columns:
+        if str(c).lower() == target:
+            return c
+    # Also allow duplicate columns like IQ_TOTAL_REV.1 to map back to IQ_TOTAL_REV
+    for c in df.columns:
+        base = re.sub(r"\.\d+$", "", str(c)).lower()
+        if base == target:
+            return c
+    return None
+
+def add_capiq_mapped_metric_columns(perf_df, mapping_df):
+    """
+    Create management-metric columns from Capital IQ fields so that metrics found in
+    10-Ks can be analyzed using the corresponding CAPIQ annual series.
+    """
+    if perf_df is None or perf_df.empty or mapping_df is None or mapping_df.empty:
+        return perf_df.copy()
+
+    out = perf_df.copy()
+
+    for _, r in mapping_df.iterrows():
+        input_metric = str(r.get("Input Metric", "")).strip()
+        mapped_metric = str(r.get("Mapped Metric", "")).strip()
+        capiq_field = str(r.get("Capital IQ Field", "")).strip()
+        if not input_metric or not capiq_field:
+            continue
+
+        # Do not overwrite a real company-provided metric column.
+        if find_existing_column_case_insensitive(out, input_metric):
+            continue
+
+        # Simple direct CAPIQ field.
+        fields = re.findall(r"IQ_[A-Z0-9_]+", capiq_field)
+        if len(fields) == 1 and "/" not in capiq_field and "YoY" not in capiq_field:
+            actual = find_existing_column_case_insensitive(out, fields[0])
+            if actual:
+                out[input_metric] = out[actual]
+            continue
+
+        # Derived ratio: A / B
+        if "/" in capiq_field and len(fields) >= 2:
+            num = find_existing_column_case_insensitive(out, fields[0])
+            den = find_existing_column_case_insensitive(out, fields[1])
+            if num and den:
+                n = pd.to_numeric(out[num].map(clean_num), errors="coerce")
+                d = pd.to_numeric(out[den].map(clean_num), errors="coerce")
+                out[input_metric] = np.where(d != 0, n / d, np.nan)
+            continue
+
+        # YoY change in a field, e.g., net debt reduction
+        if "YoY" in capiq_field and fields:
+            actual = find_existing_column_case_insensitive(out, fields[0])
+            year_col = infer_year_col(out)
+            if actual and year_col:
+                temp = out.copy()
+                temp["_year_tmp"] = standardize_year(temp[year_col])
+                temp = temp.sort_values("_year_tmp")
+                vals = pd.to_numeric(temp[actual].map(clean_num), errors="coerce")
+                temp[input_metric] = vals.diff()
+                out = out.merge(temp[["_year_tmp", input_metric]], left_on=standardize_year(out[year_col]), right_on="_year_tmp", how="left").drop(columns=["_year_tmp"])
+            continue
+
+    return out
+
+def build_management_metric_bridge_table(mapping_df, perf_df):
+    """Show which management metrics can now be tested using CAPIQ fields."""
+    if mapping_df is None or mapping_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in mapping_df.iterrows():
+        metric = str(r.get("Input Metric", "")).strip()
+        capiq_field = str(r.get("Capital IQ Field", "")).strip()
+        fields = re.findall(r"IQ_[A-Z0-9_]+", capiq_field)
+        available_fields = []
+        missing_fields = []
+        for f in fields:
+            if find_existing_column_case_insensitive(perf_df, f):
+                available_fields.append(f)
+            else:
+                missing_fields.append(f)
+        has_values = bool(metric and find_existing_column_case_insensitive(perf_df, metric)) or (fields and not missing_fields)
+        if capiq_field == "":
+            status = "Needs company/manual values"
+        elif has_values:
+            status = "Ready to analyze"
+        else:
+            status = "Capital IQ field not found in pasted data"
+        rows.append({
+            "Management Metric": metric,
+            "Mapped Metric": r.get("Mapped Metric", ""),
+            "Capital IQ Field": capiq_field,
+            "Available in Data": has_values,
+            "Status": status,
+            "Notes": r.get("Notes", "")
+        })
+    return pd.DataFrame(rows)
+
+
+
 # -----------------------------
 # Utility functions
 # -----------------------------
@@ -858,6 +960,18 @@ def extract_candidate_financial_values(text, selected_metrics):
 
 def metric_category(name):
     n = str(name).lower()
+    # Recognize common Capital IQ fields
+    if "iq_total_rev" in n:
+        return "Growth"
+    if "iq_ebitda" in n or "iq_eps" in n or "iq_ebit" in n:
+        return "Profitability"
+    if "iq_levered_fcf" in n or "iq_cash" in n:
+        return "Cash Flow"
+    if "iq_return" in n or "roic" in n:
+        return "Capital Efficiency"
+    if "iq_marketcap" in n or "iq_closeprice" in n:
+        return "Shareholder Value"
+
     for key, (display, cat) in KNOWN_METRICS.items():
         if key in n or n in key:
             return cat
@@ -1605,6 +1719,16 @@ elif workflow == "3. Company DNA":
         st.success("Candidate metric annual values have been merged into the performance dataset.")
         with st.expander("Performance dataset after adding candidate metric annual values"):
             st.dataframe(perf_df, use_container_width=True)
+
+    if "capiq_mapping_df" in st.session_state and not st.session_state.capiq_mapping_df.empty:
+        perf_df = add_capiq_mapped_metric_columns(perf_df, st.session_state.capiq_mapping_df)
+        bridge_df = build_management_metric_bridge_table(st.session_state.capiq_mapping_df, perf_df)
+        st.subheader("Capital IQ Bridge")
+        st.caption("Management metrics from the 10-K review are linked to Capital IQ fields where possible. Ready metrics are now available for correlation testing.")
+        st.dataframe(bridge_df, use_container_width=True)
+        ready_count = int((bridge_df["Status"] == "Ready to analyze").sum()) if not bridge_df.empty else 0
+        if ready_count:
+            st.success(f"{ready_count} management metrics are now ready to analyze using Capital IQ values.")
 
     perf_cols = [c for c in perf_df.columns if c != perf_year and c != "Year"]
     payout_cols = [c for c in payout_df.columns if c != payout_year]
