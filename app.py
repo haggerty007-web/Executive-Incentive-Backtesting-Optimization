@@ -336,6 +336,79 @@ def download_df_button(df, label, filename):
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(label, csv, file_name=filename, mime="text/csv")
 
+
+def build_potential_new_metrics(candidate_df, mgmt_df, perf_cols):
+    """Identify management-priority metrics that were found in documents but are not yet in the performance dataset."""
+    if candidate_df is None or candidate_df.empty:
+        return pd.DataFrame()
+
+    rows = []
+    perf_lower = {str(c).lower(): c for c in perf_cols}
+
+    for _, r in candidate_df.iterrows():
+        metric = str(r.get("Metric", "")).strip()
+        if not metric:
+            continue
+        has_values = bool(r.get("Has Historical Values", False))
+        if has_values:
+            continue
+
+        mgmt_row = pd.DataFrame()
+        if mgmt_df is not None and not mgmt_df.empty and "Metric" in mgmt_df.columns:
+            exact = mgmt_df[mgmt_df["Metric"].astype(str).str.lower() == metric.lower()]
+            fuzzy = mgmt_df[mgmt_df["Metric"].astype(str).str.lower().apply(lambda x: x in metric.lower() or metric.lower() in x)]
+            mgmt_row = exact if not exact.empty else fuzzy
+
+        mention_count = 0
+        years_mentioned = 0
+        emphasis = 0
+        confidence = 0
+        if not mgmt_row.empty:
+            if "Mention Count" in mgmt_row.columns:
+                mention_count = float(pd.to_numeric(mgmt_row["Mention Count"], errors="coerce").fillna(0).max())
+            if "Years Mentioned" in mgmt_row.columns:
+                years_mentioned = float(pd.to_numeric(mgmt_row["Years Mentioned"], errors="coerce").fillna(0).max())
+            if "Management Emphasis" in mgmt_row.columns:
+                emphasis = float(pd.to_numeric(mgmt_row["Management Emphasis"], errors="coerce").fillna(0).max())
+            if "Extraction Confidence" in mgmt_row.columns:
+                confidence = float(pd.to_numeric(mgmt_row["Extraction Confidence"], errors="coerce").fillna(0).max())
+
+        # Practical recommendation score. This is not TSR correlation yet. It is a sourcing/priority score.
+        priority_score = min(100, emphasis * 16 + min(20, mention_count / 2) + min(15, years_mentioned * 2) + min(15, confidence / 7))
+
+        if priority_score >= 75:
+            action = "Collect annual values and test"
+        elif priority_score >= 50:
+            action = "Review with consultant"
+        else:
+            action = "Lower priority"
+
+        rows.append({
+            "Potential New Metric": metric,
+            "Category": r.get("Category", metric_category(metric)),
+            "Management Emphasis": emphasis,
+            "Mention Count": mention_count,
+            "Years Mentioned": years_mentioned,
+            "Extraction Confidence": confidence,
+            "Priority Score": priority_score,
+            "Recommended Action": action,
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["Priority Score", "Mention Count"], ascending=False)
+
+def build_missing_values_template(potential_df, model_df):
+    if potential_df is None or potential_df.empty or model_df is None or model_df.empty:
+        return pd.DataFrame()
+    years = sorted(model_df["Year"].dropna().astype(int).unique().tolist()) if "Year" in model_df.columns else []
+    template = pd.DataFrame({"Year": years})
+    for m in potential_df["Potential New Metric"].tolist():
+        template[m] = ""
+    return template
+
+
 def sample_perf():
     return pd.DataFrame({
         "Year": list(range(2016, 2026)),
@@ -637,7 +710,24 @@ elif workflow == "3. Company DNA":
                 f"{len(missing_values)} management-priority metrics were found in the documents but do not yet have annual values in the performance dataset. "
                 "They can be included in the management-priority library, but TSR/payout correlations require a Year-by-Year value series."
             )
-            download_df_button(missing_values, "Download missing metric value template", "missing_metric_values_template.csv")
+
+            st.subheader("Potential New Metrics from 10-K / Investor Communications")
+            potential_df = build_potential_new_metrics(candidate_df, mgmt_df, perf_cols)
+            if potential_df.empty:
+                st.caption("No additional potential metrics were identified beyond the performance dataset.")
+            else:
+                st.caption(
+                    "These are management-priority metrics surfaced from the document review. "
+                    "They are not yet in the performance dataset, so the app cannot calculate TSR or payout correlations until annual values are added."
+                )
+                st.dataframe(potential_df, use_container_width=True)
+                download_df_button(potential_df, "Download potential new metrics", "potential_new_metrics_from_10k.csv")
+
+                st.markdown("**Next step:** collect annual values for the metrics you want to test.")
+                missing_template = build_missing_values_template(potential_df, model_df if "model_df" in locals() else pd.DataFrame())
+                if not missing_template.empty:
+                    st.dataframe(missing_template.head(10), use_container_width=True)
+                    download_df_button(missing_template, "Download annual values template", "annual_values_needed_for_new_metrics.csv")
 
     analyzable_metrics = candidate_df[candidate_df["Has Historical Values"]]["Metric"].tolist() if not candidate_df.empty else perf_cols
     default_metrics = analyzable_metrics[:min(10, len(analyzable_metrics))]
@@ -768,7 +858,7 @@ elif workflow == "4. Evidence Engine":
 
 elif workflow == "5. Design Lab":
     st.header("5. Design Lab")
-    st.info("Use the evidence scorecard to build a practical alternative design. This prototype compares evidence strength, not full payout accounting.")
+    st.info("Use analyzed metrics to build a practical alternative design. Potential new metrics from 10-Ks must first be added as annual values before they can be tested here.")
 
     if st.session_state.score_df.empty:
         st.warning("Run Company DNA first.")
