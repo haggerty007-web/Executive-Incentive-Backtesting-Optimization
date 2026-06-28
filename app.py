@@ -24,13 +24,73 @@ def sample_data():
     })
 
 
-def read_data(uploaded_file):
+def is_excel(uploaded_file):
+    return uploaded_file is not None and uploaded_file.name.lower().endswith((".xlsx", ".xls"))
+
+
+def excel_sheet_names(uploaded_file):
+    if uploaded_file is None:
+        return []
+    uploaded_file.seek(0)
+    xls = pd.ExcelFile(uploaded_file)
+    return xls.sheet_names
+
+
+def header_score(row):
+    score = 0
+    for val in row:
+        if pd.isna(val):
+            continue
+        txt = str(val).strip()
+        if not txt:
+            continue
+        # Penalize long encoded/cache-looking values.
+        if len(txt) > 60:
+            score -= 3
+        # Reward likely column labels.
+        if any(ch.isalpha() for ch in txt):
+            score += 2
+        if any(key in txt.lower() for key in ["year", "fye", "payout", "revenue", "ebitda", "eps", "tsr", "market", "metric", "weight"]):
+            score += 4
+    return score
+
+
+def detect_excel_layout(uploaded_file):
+    """Return a reasonable default sheet and header row for messy workbooks."""
+    if not is_excel(uploaded_file):
+        return None, 0
+    names = excel_sheet_names(uploaded_file)
+    best_sheet = names[0] if names else None
+    best_header = 0
+    best_score = -10**9
+    for sheet in names:
+        uploaded_file.seek(0)
+        try:
+            preview = pd.read_excel(uploaded_file, sheet_name=sheet, header=None, nrows=30)
+        except Exception:
+            continue
+        for idx in range(len(preview)):
+            row_score = header_score(preview.iloc[idx])
+            below = preview.iloc[idx+1:idx+8] if idx + 1 < len(preview) else pd.DataFrame()
+            numeric_count = 0
+            if not below.empty:
+                numeric_count = below.apply(pd.to_numeric, errors="coerce").notna().sum().sum()
+            total = row_score + numeric_count * 0.25
+            if total > best_score:
+                best_score = total
+                best_sheet = sheet
+                best_header = idx
+    return best_sheet, int(best_header)
+
+
+def read_data(uploaded_file, sheet_name=None, header_row=0):
     if uploaded_file is None:
         return sample_data()
     name = uploaded_file.name.lower()
+    uploaded_file.seek(0)
     if name.endswith(".csv"):
-        return pd.read_csv(uploaded_file)
-    return pd.read_excel(uploaded_file)
+        return pd.read_csv(uploaded_file, header=header_row)
+    return pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row)
 
 
 def clean_columns(df):
@@ -167,8 +227,20 @@ st.info("Start with the company's own history. The tool identifies what drove va
 
 with st.sidebar:
     st.header("1. Upload Data")
-    uploaded = st.file_uploader("CSV or Excel", type=["csv", "xlsx"])
+    uploaded = st.file_uploader("CSV or Excel", type=["csv", "xlsx", "xls"])
     st.caption("Use annual data where possible. At minimum: period, actual payout %, shareholder value measure, and candidate performance metrics.")
+
+    selected_sheet = None
+    header_row = 0
+    if uploaded is not None and is_excel(uploaded):
+        default_sheet, default_header = detect_excel_layout(uploaded)
+        sheets = excel_sheet_names(uploaded)
+        default_index = sheets.index(default_sheet) if default_sheet in sheets else 0
+        selected_sheet = st.selectbox("Excel worksheet", sheets, index=default_index)
+        header_row = st.number_input("Header row number", min_value=1, max_value=50, value=int(default_header) + 1, step=1) - 1
+        st.caption("For your GPK file, the real data is on Sheet1 with headers on row 3. The hidden CIQ cache sheet should be ignored.")
+    elif uploaded is not None:
+        header_row = st.number_input("Header row number", min_value=1, max_value=50, value=1, step=1) - 1
 
     st.header("2. Payout Curve")
     threshold_perf = st.number_input("Threshold performance", value=0.90, step=0.05)
@@ -181,7 +253,7 @@ with st.sidebar:
     max_metrics = st.slider("Maximum metrics per plan", 1, 5, 4)
     step = st.selectbox("Weighting increment", [10, 20, 25, 50], index=2)
 
-raw = clean_columns(read_data(uploaded))
+raw = clean_columns(read_data(uploaded, selected_sheet, header_row))
 
 st.subheader("Data Preview")
 st.dataframe(raw, use_container_width=True)
@@ -216,7 +288,16 @@ for i, metric in enumerate(selected_metrics):
         directions[metric] = st.selectbox(f"{metric}", ["Higher is better", "Lower is better", "Target range"], key=f"dir_{metric}")
 
 work = raw.copy()
-work[period_col] = pd.to_datetime(work[period_col], errors="coerce")
+# Period handling: allow true dates, fiscal years, or Excel serial dates.
+period_numeric = pd.to_numeric(work[period_col], errors="coerce")
+if period_numeric.notna().sum() >= max(3, len(work) // 2):
+    # Excel serial dates are commonly above 20,000. Fiscal years are commonly 1900-2100.
+    if period_numeric.median() > 20000:
+        work[period_col] = pd.to_datetime(period_numeric, unit="D", origin="1899-12-30", errors="coerce")
+    else:
+        work[period_col] = period_numeric
+else:
+    work[period_col] = pd.to_datetime(work[period_col], errors="coerce")
 if work[period_col].notna().sum() > 0:
     work = work.sort_values(period_col)
 for c in [actual_col, value_col] + selected_metrics:
