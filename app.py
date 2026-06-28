@@ -599,7 +599,55 @@ elif workflow == "3. Company DNA":
     payout_cols = [c for c in payout_df.columns if c != payout_year]
     value_cols = [c for c in value_df.columns if c != value_year]
 
-    selected_metrics = st.multiselect("Candidate metrics to analyze (maximum 20)", perf_cols, default=perf_cols[:min(10, len(perf_cols))], max_selections=20)
+    # Metric Discovery Crosswalk:
+    # 10-K / investor communication metrics may not be present in the performance history yet.
+    # We show both sets, then only run correlations on metrics with actual annual values.
+    mgmt_metrics = []
+    if mgmt_df is not None and not mgmt_df.empty and "Metric" in mgmt_df.columns:
+        mgmt_metrics = mgmt_df["Metric"].dropna().astype(str).unique().tolist()
+
+    all_candidates = []
+    for m in perf_cols:
+        all_candidates.append({
+            "Metric": m,
+            "Source": "Performance dataset",
+            "Has Historical Values": True,
+            "Category": metric_category(m),
+            "Action": "Analyze"
+        })
+    for m in mgmt_metrics:
+        has_values = any(str(m).lower() == str(c).lower() for c in perf_cols)
+        if not any(str(m).lower() == str(x["Metric"]).lower() for x in all_candidates):
+            all_candidates.append({
+                "Metric": m,
+                "Source": "10-K / investor communications",
+                "Has Historical Values": has_values,
+                "Category": metric_category(m),
+                "Action": "Needs values" if not has_values else "Analyze"
+            })
+
+    candidate_df = pd.DataFrame(all_candidates)
+    if not candidate_df.empty:
+        st.subheader("Metric Discovery Crosswalk")
+        st.caption("This shows the metrics found in 10-Ks/investor communications and whether the app has annual values needed to test TSR correlation.")
+        st.dataframe(candidate_df, use_container_width=True)
+        missing_values = candidate_df[(candidate_df["Source"] == "10-K / investor communications") & (~candidate_df["Has Historical Values"])]
+        if not missing_values.empty:
+            st.warning(
+                f"{len(missing_values)} management-priority metrics were found in the documents but do not yet have annual values in the performance dataset. "
+                "They can be included in the management-priority library, but TSR/payout correlations require a Year-by-Year value series."
+            )
+            download_df_button(missing_values, "Download missing metric value template", "missing_metric_values_template.csv")
+
+    analyzable_metrics = candidate_df[candidate_df["Has Historical Values"]]["Metric"].tolist() if not candidate_df.empty else perf_cols
+    default_metrics = analyzable_metrics[:min(10, len(analyzable_metrics))]
+
+    selected_metrics = st.multiselect(
+        "Candidate metrics to analyze correlations (maximum 20; must have annual values)",
+        analyzable_metrics,
+        default=default_metrics,
+        max_selections=20
+    )
     payout_col = st.selectbox("Actual payout column", payout_cols)
     value_col = st.selectbox("Shareholder value measure", value_cols)
 
@@ -615,7 +663,11 @@ elif workflow == "3. Company DNA":
         st.error("Merged dataset is empty. Check year fields and overlapping fiscal years.")
         st.stop()
 
-    score_df = score_metrics(model_df, selected_metrics, value_col, payout_col, mgmt_df)
+    # Match selected 10-K metrics to performance columns when names are case-equivalent.
+    metric_lookup = {str(c).lower(): c for c in model_df.columns}
+    selected_for_model = [metric_lookup.get(str(m).lower(), m) for m in selected_metrics if str(m).lower() in metric_lookup]
+
+    score_df = score_metrics(model_df, selected_for_model, value_col, payout_col, mgmt_df)
     st.session_state.score_df = score_df
 
     st.subheader(f"{company_name} Company DNA")
@@ -658,7 +710,7 @@ elif workflow == "3. Company DNA":
 
 elif workflow == "4. Evidence Engine":
     st.header("4. Evidence Engine")
-    st.info("Review the underlying evidence. Correlations are directional, especially with small annual samples.")
+    st.info("Review the underlying evidence. Metrics extracted from 10-Ks are compared only when they also have annual values in the performance dataset or extracted value table.")
 
     if st.session_state.score_df.empty:
         st.warning("Run Company DNA first.")
