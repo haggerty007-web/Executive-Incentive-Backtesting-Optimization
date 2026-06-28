@@ -59,6 +59,301 @@ CATEGORY_MAP = {
     "ESG / Human Capital": ["safety", "sustainability", "emissions", "diversity"],
 }
 
+
+# Capital IQ mapping dictionary.
+# This is intentionally practical, not exhaustive. Expand over time as engagements reveal new metrics.
+CAPIQ_FIELD_DICTIONARY = [
+    {
+        "Canonical Metric": "Revenue",
+        "Aliases": ["revenue", "sales", "net sales", "total revenue", "net revenue"],
+        "Category": "Growth",
+        "Capital IQ Field": "IQ_TOTAL_REV",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Best standard field for revenue/net sales. Use company data if organic sales is required."
+    },
+    {
+        "Canonical Metric": "Organic Sales",
+        "Aliases": ["organic sales", "organic revenue", "organic growth", "organic sales growth"],
+        "Category": "Growth",
+        "Capital IQ Field": "",
+        "Source Type": "Company / Investor Materials",
+        "Status": "Needs company values",
+        "Notes": "Usually company-defined and not standard in Capital IQ."
+    },
+    {
+        "Canonical Metric": "EBITDA",
+        "Aliases": ["ebitda"],
+        "Category": "Profitability",
+        "Capital IQ Field": "IQ_EBITDA",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Standard EBITDA. May differ from company adjusted EBITDA."
+    },
+    {
+        "Canonical Metric": "Adjusted EBITDA",
+        "Aliases": ["adjusted ebitda", "adj ebitda", "ebitda excluding", "ebitda ex"],
+        "Category": "Profitability",
+        "Capital IQ Field": "",
+        "Source Type": "Company / Investor Materials",
+        "Status": "Needs company values",
+        "Notes": "Management-defined non-GAAP metric. Use proxy, earnings releases, investor deck, or FP&A."
+    },
+    {
+        "Canonical Metric": "EBITDA Margin",
+        "Aliases": ["ebitda margin", "adjusted ebitda margin"],
+        "Category": "Profitability",
+        "Capital IQ Field": "IQ_EBITDA / IQ_TOTAL_REV",
+        "Source Type": "Derived from Capital IQ",
+        "Status": "Derived",
+        "Notes": "Use company adjusted EBITDA margin if management-defined."
+    },
+    {
+        "Canonical Metric": "EBIT",
+        "Aliases": ["ebit", "operating income"],
+        "Category": "Profitability",
+        "Capital IQ Field": "IQ_EBIT",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Standard EBIT / operating income field."
+    },
+    {
+        "Canonical Metric": "Gross Margin",
+        "Aliases": ["gross margin", "gross profit margin"],
+        "Category": "Profitability",
+        "Capital IQ Field": "IQ_GROSS_MARGIN",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Margin field. Confirm scale as percent."
+    },
+    {
+        "Canonical Metric": "EPS",
+        "Aliases": ["eps", "earnings per share", "adjusted eps", "normalized eps"],
+        "Category": "Profitability",
+        "Capital IQ Field": "IQ_EPS_NORM",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Normalized EPS. Company adjusted EPS may need manual values."
+    },
+    {
+        "Canonical Metric": "Free Cash Flow",
+        "Aliases": ["free cash flow", "fcf", "cash flow"],
+        "Category": "Cash Flow",
+        "Capital IQ Field": "IQ_LEVERED_FCF",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Levered FCF is usually closest standard field. Confirm against company definition."
+    },
+    {
+        "Canonical Metric": "Operating Cash Flow",
+        "Aliases": ["operating cash flow", "cash from operations", "cash flow from operations"],
+        "Category": "Cash Flow",
+        "Capital IQ Field": "IQ_CASH_FROM_OPER",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Cash from operating activities."
+    },
+    {
+        "Canonical Metric": "Cash Flow Before Debt Reduction",
+        "Aliases": ["cash flow before debt reduction", "cash flow available for debt reduction"],
+        "Category": "Cash Flow",
+        "Capital IQ Field": "",
+        "Source Type": "Company / Investor Materials",
+        "Status": "Needs company values",
+        "Notes": "Company-defined metric. Use proxy/plan calculation or FP&A."
+    },
+    {
+        "Canonical Metric": "ROIC",
+        "Aliases": ["roic", "return on invested capital", "return on capital"],
+        "Category": "Capital Efficiency",
+        "Capital IQ Field": "IQ_RETURN_INVESTED_CAPITAL",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Closest standard Capital IQ return metric. Confirm definition."
+    },
+    {
+        "Canonical Metric": "ROE",
+        "Aliases": ["roe", "return on equity"],
+        "Category": "Capital Efficiency",
+        "Capital IQ Field": "IQ_RETURN_EQUITY",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Return on equity."
+    },
+    {
+        "Canonical Metric": "ROA",
+        "Aliases": ["roa", "return on assets"],
+        "Category": "Capital Efficiency",
+        "Capital IQ Field": "IQ_RETURN_ASSETS",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Return on assets."
+    },
+    {
+        "Canonical Metric": "Net Debt",
+        "Aliases": ["net debt"],
+        "Category": "Balance Sheet",
+        "Capital IQ Field": "IQ_NET_DEBT",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Use for leverage/debt reduction calculations."
+    },
+    {
+        "Canonical Metric": "Leverage Ratio",
+        "Aliases": ["leverage ratio", "net leverage", "debt leverage"],
+        "Category": "Balance Sheet",
+        "Capital IQ Field": "IQ_NET_DEBT / IQ_EBITDA",
+        "Source Type": "Derived from Capital IQ",
+        "Status": "Derived",
+        "Notes": "Use company adjusted leverage if disclosed."
+    },
+    {
+        "Canonical Metric": "Debt Reduction",
+        "Aliases": ["debt reduction", "deleveraging"],
+        "Category": "Balance Sheet",
+        "Capital IQ Field": "YoY change in IQ_NET_DEBT",
+        "Source Type": "Derived from Capital IQ",
+        "Status": "Derived",
+        "Notes": "Derived from year-over-year net debt movement."
+    },
+    {
+        "Canonical Metric": "Market Cap",
+        "Aliases": ["market cap", "market capitalization"],
+        "Category": "Shareholder Value",
+        "Capital IQ Field": "IQ_MARKETCAP",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Shareholder value measure."
+    },
+    {
+        "Canonical Metric": "Stock Price",
+        "Aliases": ["stock price", "share price", "closing price"],
+        "Category": "Shareholder Value",
+        "Capital IQ Field": "IQ_CLOSEPRICE_ADJ",
+        "Source Type": "Capital IQ",
+        "Status": "Ready",
+        "Notes": "Adjusted close price."
+    },
+    {
+        "Canonical Metric": "Pricing",
+        "Aliases": ["pricing", "price realization", "pricing realization", "price mix"],
+        "Category": "Commercial",
+        "Capital IQ Field": "",
+        "Source Type": "Company / Investor Materials",
+        "Status": "Needs company values",
+        "Notes": "Typically company-specific commercial KPI."
+    },
+    {
+        "Canonical Metric": "Cost Savings",
+        "Aliases": ["cost savings", "cost reduction"],
+        "Category": "Operations",
+        "Capital IQ Field": "",
+        "Source Type": "Company / Investor Materials",
+        "Status": "Needs company values",
+        "Notes": "Typically company-specific productivity or transformation KPI."
+    },
+    {
+        "Canonical Metric": "Productivity Savings",
+        "Aliases": ["productivity", "productivity savings"],
+        "Category": "Operations",
+        "Capital IQ Field": "",
+        "Source Type": "Company / Investor Materials",
+        "Status": "Needs company values",
+        "Notes": "Typically company-specific operational KPI."
+    },
+    {
+        "Canonical Metric": "Safety",
+        "Aliases": ["safety", "trir", "recordable incident rate"],
+        "Category": "Human Capital",
+        "Capital IQ Field": "",
+        "Source Type": "Company / ESG / Internal",
+        "Status": "Needs company values",
+        "Notes": "Usually internal or sustainability report metric."
+    },
+]
+
+def normalize_text_for_match(x):
+    return re.sub(r"[^a-z0-9]+", " ", str(x).lower()).strip()
+
+def capiq_dictionary_df():
+    return pd.DataFrame(CAPIQ_FIELD_DICTIONARY)
+
+def map_metric_to_capiq(metric):
+    """Map a management/candidate metric to the most likely Capital IQ field."""
+    m = normalize_text_for_match(metric)
+    best = None
+    best_score = 0
+
+    for row in CAPIQ_FIELD_DICTIONARY:
+        candidates = [row["Canonical Metric"]] + row.get("Aliases", [])
+        for alias in candidates:
+            a = normalize_text_for_match(alias)
+            score = 0
+            if m == a:
+                score = 100
+            elif m in a or a in m:
+                score = 85
+            else:
+                # token overlap
+                mt = set(m.split())
+                at = set(a.split())
+                if mt and at:
+                    score = 100 * len(mt & at) / max(len(mt), len(at))
+            if score > best_score:
+                best_score = score
+                best = row
+
+    if best is None or best_score < 35:
+        return {
+            "Input Metric": metric,
+            "Mapped Metric": metric,
+            "Category": metric_category(metric),
+            "Capital IQ Field": "",
+            "Source Type": "Company / Manual",
+            "Status": "Needs mapping",
+            "Match Confidence": round(best_score, 1),
+            "Notes": "No strong Capital IQ dictionary match. Review manually."
+        }
+
+    return {
+        "Input Metric": metric,
+        "Mapped Metric": best["Canonical Metric"],
+        "Category": best["Category"],
+        "Capital IQ Field": best["Capital IQ Field"],
+        "Source Type": best["Source Type"],
+        "Status": best["Status"],
+        "Match Confidence": round(best_score, 1),
+        "Notes": best["Notes"]
+    }
+
+def build_capiq_mapping_table(metrics):
+    rows = [map_metric_to_capiq(m) for m in metrics if str(m).strip()]
+    if not rows:
+        return pd.DataFrame()
+    out = pd.DataFrame(rows)
+    # Remove duplicate input rows
+    return out.drop_duplicates(subset=["Input Metric"], keep="first")
+
+def capiq_export_fields(mapping_df):
+    """Create a unique field list for Capital IQ export, expanding derived fields into components."""
+    if mapping_df is None or mapping_df.empty:
+        return pd.DataFrame()
+    fields = []
+    for f in mapping_df["Capital IQ Field"].dropna().astype(str):
+        if not f.strip():
+            continue
+        # Derived field expressions may include multiple IQ_ fields.
+        found = re.findall(r"IQ_[A-Z0-9_]+", f)
+        if found:
+            fields.extend(found)
+        elif f.startswith("IQ_"):
+            fields.append(f)
+    # Always include shareholder value basics
+    fields.extend(["IQ_MARKETCAP", "IQ_CLOSEPRICE_ADJ"])
+    unique = sorted(set(fields))
+    return pd.DataFrame({"Capital IQ Field": unique})
+
+
 # -----------------------------
 # Utility functions
 # -----------------------------
@@ -414,7 +709,7 @@ def consultant_potential_metric_analysis(candidate_df, score_df=None, existing_p
             next_step = "Include in Evidence Engine"
         else:
             status = "Needs annual values"
-            next_step = "Paste annual values in 2A, then test TSR/payout correlation"
+            next_step = "Paste annual values in 2B, then test TSR/payout correlation"
 
         if candidate_score >= 80:
             priority = "High"
@@ -823,7 +1118,7 @@ def assess_new_metric_candidates(potential_df, existing_metrics):
 
         if assessment_score >= 80:
             priority = "High"
-            recommendation = "Paste annual values in 2A and test against TSR"
+            recommendation = "Paste annual values in 2B and test against TSR"
         elif assessment_score >= 65:
             priority = "Medium"
             recommendation = "Review with consultant; collect values if strategically relevant"
@@ -908,7 +1203,8 @@ workflow = st.sidebar.radio(
     [
         "1. Import Data",
         "2. Management Metrics",
-        "2A. Candidate Metric Values",
+        "2A. Capital IQ Mapping",
+        "2B. Candidate Metric Values",
         "3. Company DNA",
         "4. Evidence Engine",
         "5. Design Lab",
@@ -1139,14 +1435,78 @@ elif workflow == "2. Management Metrics":
             download_df_button(curated, "Download curated metric library", "curated_management_metric_library.csv")
 
 # -----------------------------
-# 2A. Candidate Metric Values
+# 2A. Capital IQ Mapping
 # -----------------------------
 
-elif workflow == "2A. Candidate Metric Values":
-    st.header("2A. Candidate Metric Annual Values")
+elif workflow == "2A. Capital IQ Mapping":
+    st.header("2A. Capital IQ Mapping")
     st.info(
-        "Use this section to paste or upload annual values for potential new metrics identified from 10-Ks/investor materials. "
-        "Capital IQ, company financials, or a manually prepared table all work. This is what allows the app to actually test new metrics against TSR and payouts."
+        "Use 10-Ks and investor materials to identify candidate metrics, then map those metrics to Capital IQ fields where possible. "
+        "Capital IQ provides reliable annual values for standard financial metrics; company-specific adjusted metrics still need manual/company data."
+    )
+
+    mgmt_df = st.session_state.mgmt_df if "mgmt_df" in st.session_state else pd.DataFrame()
+
+    if mgmt_df.empty or "Metric" not in mgmt_df.columns:
+        st.warning("Run Management Metrics first, or paste candidate metrics below.")
+        pasted = st.text_area("Optional: paste candidate metrics, one per line", height=160, key="manual_capiq_metric_list")
+        metrics = [x.strip() for x in pasted.splitlines() if x.strip()]
+    else:
+        st.subheader("Candidate metrics from Management Priority Metrics")
+        metrics = mgmt_df["Metric"].dropna().astype(str).unique().tolist()
+        st.write(", ".join(metrics))
+
+    extra = st.text_area("Add additional metrics to map, one per line", height=120, key="extra_capiq_metrics")
+    if extra.strip():
+        metrics += [x.strip() for x in extra.splitlines() if x.strip()]
+
+    metrics = list(dict.fromkeys(metrics))
+
+    if not metrics:
+        st.stop()
+
+    mapping_df = build_capiq_mapping_table(metrics)
+    st.subheader("Capital IQ Metric Mapping")
+    st.caption("Review the suggested mapping. Standard fields can be pulled from Capital IQ. Company-specific metrics need manual/company values.")
+    edited_mapping = st.data_editor(mapping_df, use_container_width=True, num_rows="dynamic", key="capiq_mapping_editor")
+    st.session_state.capiq_mapping_df = edited_mapping
+    download_df_button(edited_mapping, "Download Capital IQ mapping", "capital_iq_metric_mapping.csv")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Mapped to Capital IQ", int((edited_mapping["Source Type"].astype(str).str.contains("Capital IQ", case=False, na=False)).sum()))
+    c2.metric("Needs company values", int((edited_mapping["Status"].astype(str).str.contains("Needs", case=False, na=False)).sum()))
+    c3.metric("Derived metrics", int((edited_mapping["Status"].astype(str) == "Derived").sum()))
+
+    export_df = capiq_export_fields(edited_mapping)
+    st.subheader("Capital IQ Download Field List")
+    st.caption("Use these fields for a 10-year annual Capital IQ export. Include fiscal year/date in the export.")
+    if export_df.empty:
+        st.warning("No Capital IQ fields identified.")
+    else:
+        st.dataframe(export_df, use_container_width=True)
+        download_df_button(export_df, "Download Capital IQ field list", "capital_iq_field_list.csv")
+
+    needs_company = edited_mapping[edited_mapping["Capital IQ Field"].fillna("").astype(str).str.strip() == ""]
+    if not needs_company.empty:
+        st.subheader("Company-Specific Metrics Requiring Manual Values")
+        st.caption("These are not standard Capital IQ fields. Use proxy, investor materials, earnings releases, or FP&A.")
+        st.dataframe(needs_company[["Input Metric", "Mapped Metric", "Category", "Status", "Notes"]], use_container_width=True)
+
+    with st.expander("View / edit built-in Capital IQ dictionary"):
+        dictionary = capiq_dictionary_df()
+        st.dataframe(dictionary, use_container_width=True)
+        download_df_button(dictionary, "Download built-in dictionary", "capital_iq_dictionary.csv")
+
+
+# -----------------------------
+# 2B. Candidate Metric Values
+# -----------------------------
+
+elif workflow == "2B. Candidate Metric Values":
+    st.header("2B. Candidate Metric Annual Values")
+    st.info(
+        "Paste or upload the annual values from your Capital IQ export and any company-specific metrics. "
+        "This is the step that makes candidate metrics testable against TSR and payouts."
     )
 
     st.markdown("""
