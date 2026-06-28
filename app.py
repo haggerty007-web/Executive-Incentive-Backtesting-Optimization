@@ -17,10 +17,36 @@ def clean_col(c):
 
 
 def normalize_year_series(s: pd.Series) -> pd.Series:
-    dt = pd.to_datetime(s, errors="coerce")
-    if dt.notna().mean() > 0.5:
-        return dt.dt.year
-    return pd.to_numeric(s, errors="coerce").astype("Int64")
+    """Return a clean calendar/fiscal year from common Excel inputs.
+
+    Handles:
+    - 2024
+    - "2024"
+    - "FY2024"
+    - "12/31/2024"
+    - true Excel/Pandas date values
+
+    Important: do NOT send a numeric year directly to pd.to_datetime first.
+    Pandas can interpret 2024 as 2024 nanoseconds after 1970, which creates
+    the 1970 bug you saw in the app.
+    """
+    raw = s.copy()
+    as_text = raw.astype(str).str.strip()
+
+    # First, extract a clear 4-digit year from strings such as FY2024 or 12/31/2024.
+    extracted = as_text.str.extract(r"((?:19|20)\d{2})", expand=False)
+    extracted_num = pd.to_numeric(extracted, errors="coerce")
+
+    # Next, handle numeric year values such as 2024.
+    numeric = pd.to_numeric(as_text.str.replace(",", "", regex=False), errors="coerce")
+    numeric_year = numeric.where((numeric >= 1900) & (numeric <= 2100))
+
+    # Finally, handle actual date values that did not contain an obvious 4-digit year.
+    dt = pd.to_datetime(raw, errors="coerce")
+    date_year = dt.dt.year.where((dt.dt.year >= 1900) & (dt.dt.year <= 2100))
+
+    result = extracted_num.combine_first(numeric_year).combine_first(date_year)
+    return result.astype("Int64")
 
 
 def parse_pasted_table(text: str) -> pd.DataFrame:
