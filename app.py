@@ -409,6 +409,101 @@ def build_missing_values_template(potential_df, model_df):
     return template
 
 
+def assess_new_metric_candidates(potential_df, existing_metrics):
+    """Create a consultant-style assessment of potential metrics before annual data is available."""
+    if potential_df is None or potential_df.empty:
+        return pd.DataFrame()
+
+    existing_lower = [str(m).lower() for m in existing_metrics]
+    rows = []
+
+    category_fit = {
+        "Profitability": 95,
+        "Cash Flow": 95,
+        "Capital Efficiency": 90,
+        "Growth": 85,
+        "Operations": 75,
+        "Commercial": 70,
+        "Balance Sheet": 70,
+        "Strategy": 65,
+        "ESG": 55,
+        "Human Capital": 55,
+        "Other": 45,
+    }
+
+    for _, r in potential_df.iterrows():
+        metric = str(r.get("Potential New Metric", "")).strip()
+        category = str(r.get("Category", metric_category(metric))).strip()
+        emphasis = float(pd.to_numeric(pd.Series([r.get("Management Emphasis", 0)]), errors="coerce").fillna(0).iloc[0])
+        mentions = float(pd.to_numeric(pd.Series([r.get("Mention Count", 0)]), errors="coerce").fillna(0).iloc[0])
+        years = float(pd.to_numeric(pd.Series([r.get("Years Mentioned", 0)]), errors="coerce").fillna(0).iloc[0])
+        confidence = float(pd.to_numeric(pd.Series([r.get("Extraction Confidence", 0)]), errors="coerce").fillna(0).iloc[0])
+
+        # Distinctiveness: downweight if it appears to be a duplicate of an existing analyzed metric.
+        metric_lower = metric.lower()
+        duplicate_like = any(metric_lower in e or e in metric_lower for e in existing_lower)
+        distinctiveness = 45 if duplicate_like else 85
+
+        # Practicality: assume financial/capital/cash/growth metrics are easier to quantify.
+        practicality = category_fit.get(category, 55)
+
+        # Not correlation. This is a screening priority score.
+        assessment_score = (
+            0.30 * min(100, emphasis * 20) +
+            0.20 * min(100, mentions * 2) +
+            0.15 * min(100, years * 10) +
+            0.15 * practicality +
+            0.10 * distinctiveness +
+            0.10 * confidence
+        )
+
+        if assessment_score >= 80:
+            priority = "High"
+            recommendation = "Collect annual values and test against TSR"
+        elif assessment_score >= 65:
+            priority = "Medium"
+            recommendation = "Review with consultant; collect values if strategically relevant"
+        else:
+            priority = "Lower"
+            recommendation = "Keep in library, but do not prioritize for current analysis"
+
+        if category in ["Profitability", "Cash Flow", "Capital Efficiency", "Growth"]:
+            data_needed = f"10-year annual history for {metric}"
+        elif category in ["Operations", "Commercial", "Strategy"]:
+            data_needed = f"Consistent annual KPI definition for {metric}"
+        else:
+            data_needed = f"Confirm definition and annual availability for {metric}"
+
+        if category == "Capital Efficiency":
+            why = "Tests whether capital discipline has been rewarded by investors."
+        elif category == "Cash Flow":
+            why = "Tests whether cash generation is a value driver and potential incentive anchor."
+        elif category == "Profitability":
+            why = "Tests whether earnings quality and margin expansion are value drivers."
+        elif category == "Growth":
+            why = "Tests whether top-line or organic growth has translated into shareholder value."
+        elif category == "Operations":
+            why = "Tests whether operational execution is linked to value creation."
+        elif category == "Commercial":
+            why = "Tests whether pricing or commercial execution has affected value."
+        else:
+            why = "Potential management priority identified in disclosures."
+
+        rows.append({
+            "Potential Metric": metric,
+            "Category": category,
+            "Preliminary Assessment Score": round(assessment_score, 1),
+            "Priority": priority,
+            "Why It May Matter": why,
+            "Data Needed": data_needed,
+            "Distinct From Current Metrics": "No / possible duplicate" if duplicate_like else "Yes",
+            "Recommendation": recommendation,
+        })
+
+    return pd.DataFrame(rows).sort_values("Preliminary Assessment Score", ascending=False)
+
+
+
 def sample_perf():
     return pd.DataFrame({
         "Year": list(range(2016, 2026)),
@@ -723,6 +818,23 @@ elif workflow == "3. Company DNA":
                 st.dataframe(potential_df, use_container_width=True)
                 download_df_button(potential_df, "Download potential new metrics", "potential_new_metrics_from_10k.csv")
 
+                st.subheader("New Metric Assessment")
+                assessment_df = assess_new_metric_candidates(potential_df, perf_cols)
+                if not assessment_df.empty:
+                    st.caption(
+                        "This is a preliminary screening assessment. It does not use TSR correlation yet because annual values are missing. "
+                        "It helps decide which new metrics are worth collecting and testing."
+                    )
+                    st.dataframe(assessment_df, use_container_width=True)
+                    download_df_button(assessment_df, "Download new metric assessment", "new_metric_assessment.csv")
+
+                    high_priority = assessment_df[assessment_df["Priority"] == "High"]
+                    if not high_priority.empty:
+                        st.success(
+                            "High-priority new metrics to collect and test: "
+                            + ", ".join(high_priority["Potential Metric"].head(8).tolist())
+                        )
+
                 st.markdown("**Next step:** collect annual values for the metrics you want to test.")
                 missing_template = build_missing_values_template(potential_df, model_df if "model_df" in locals() else pd.DataFrame())
                 if not missing_template.empty:
@@ -840,6 +952,35 @@ elif workflow == "4. Evidence Engine":
     fig = px.bar(gap_df, x="Metric", y=["Shareholder Value Corr.", "Payout Corr."], barmode="group",
                  title="What investors rewarded vs. what the plan rewarded")
     st.plotly_chart(fig, use_container_width=True, key="gap_grouped")
+
+    # Show potential metrics that have not yet been tested, if available from Company DNA session context.
+    st.subheader("Potential New Metrics Not Yet Tested")
+    st.caption("These metrics were identified from management disclosures but need annual values before they can be correlated with TSR or payouts.")
+    if "mgmt_df" in st.session_state and not st.session_state.mgmt_df.empty and "model_df" in st.session_state and not st.session_state.model_df.empty:
+        existing = st.session_state.selected_metrics if "selected_metrics" in st.session_state else []
+        # Rebuild a simple potential list from management library versus current analyzed metrics.
+        analyzed_lower = [str(x).lower() for x in existing]
+        rows = []
+        for _, r in st.session_state.mgmt_df.iterrows():
+            metric = str(r.get("Metric", "")).strip()
+            if metric and metric.lower() not in analyzed_lower:
+                rows.append({
+                    "Potential New Metric": metric,
+                    "Category": r.get("Category", metric_category(metric)),
+                    "Management Emphasis": r.get("Management Emphasis", 0),
+                    "Mention Count": r.get("Mention Count", 0),
+                    "Years Mentioned": r.get("Years Mentioned", 0),
+                    "Extraction Confidence": r.get("Extraction Confidence", 0),
+                })
+        potential_evidence_df = pd.DataFrame(rows)
+        if not potential_evidence_df.empty:
+            assessed = assess_new_metric_candidates(potential_evidence_df, existing)
+            st.dataframe(assessed, use_container_width=True)
+        else:
+            st.write("No untested management-priority metrics found.")
+    else:
+        st.write("Run Management Metrics and Company DNA first.")
+
 
     st.subheader("Metric Cards")
     metric = st.selectbox("Metric", score_df["Metric"].tolist())
