@@ -104,6 +104,51 @@ def numeric_candidate_cols(df: pd.DataFrame, exclude: List[str]) -> List[str]:
     return cols
 
 
+
+def normalize_metric_name(x: str) -> str:
+    return str(x).strip().lower().replace("_", " ").replace("-", " ").replace("  ", " ")
+
+
+def build_metric_library(library_df: pd.DataFrame, metric_col: str, category_col: str | None = None, emphasis_col: str | None = None) -> Dict[str, Dict[str, float | str]]:
+    """Create lookup from metric label to category and management emphasis score."""
+    if library_df is None or library_df.empty or metric_col is None:
+        return {}
+    lib = library_df.copy()
+    lib[metric_col] = lib[metric_col].astype(str).str.strip()
+    if emphasis_col and emphasis_col in lib.columns:
+        raw = clean_numeric(lib[emphasis_col])
+        if raw.notna().sum() > 0:
+            mn, mx = raw.min(), raw.max()
+            if mx != mn:
+                score = 40 + (raw - mn) / (mx - mn) * 60
+            else:
+                score = pd.Series(80, index=raw.index)
+        else:
+            score = pd.Series(80, index=lib.index)
+    else:
+        score = pd.Series(80, index=lib.index)
+    lookup = {}
+    for i, row in lib.iterrows():
+        metric = str(row[metric_col]).strip()
+        if not metric or metric.lower() == "nan":
+            continue
+        category = "Management priority"
+        if category_col and category_col in lib.columns and pd.notna(row[category_col]):
+            category = str(row[category_col]).strip() or "Management priority"
+        lookup[normalize_metric_name(metric)] = {
+            "display_metric": metric,
+            "category": category,
+            "management_priority_score": float(score.loc[i]) if pd.notna(score.loc[i]) else 80.0,
+        }
+    return lookup
+
+
+def match_metric_library(metric_candidates: List[str], metric_lookup: Dict[str, Dict[str, float | str]]) -> List[str]:
+    """Return performance columns that appear in the management metric library."""
+    if not metric_lookup:
+        return []
+    return [m for m in metric_candidates if normalize_metric_name(m) in metric_lookup]
+
 def safe_corr(a, b) -> float:
     x = pd.to_numeric(a, errors="coerce")
     y = pd.to_numeric(b, errors="coerce")
@@ -155,8 +200,9 @@ def percentile_score(x: float) -> float:
     return max(0.0, min(100.0, (x + 1) * 50))
 
 
-def build_metric_evidence(df, metrics, directions):
+def build_metric_evidence(df, metrics, directions, metric_lookup=None):
     rows = []
+    metric_lookup = metric_lookup or {}
     payout_std = df["Actual Payout"].std()
     for m in metrics:
         sig = metric_signal(df[m], directions[m])
@@ -166,11 +212,16 @@ def build_metric_evidence(df, metrics, directions):
         stability = 100 if pd.isna(metric_vol) else max(0, 100 - min(metric_vol, 1.0) * 100)
         value_score = percentile_score(value_corr)
         payout_score = percentile_score(payout_corr)
-        # Value alignment gets more weight than payout alignment.
-        overall = value_score * 0.50 + payout_score * 0.25 + stability * 0.15 + 10
+        lib = metric_lookup.get(normalize_metric_name(m), {})
+        category = lib.get("category", "Uncategorized")
+        priority_score = float(lib.get("management_priority_score", 50.0))
+        # Value alignment gets more weight than payout alignment. Management priority is a supplement, not the main driver.
+        overall = value_score * 0.45 + payout_score * 0.20 + stability * 0.15 + priority_score * 0.10 + 10
         gap = payout_corr - value_corr
         rows.append({
             "Metric": m,
+            "Category": category,
+            "Management Priority Score": round(priority_score, 0),
             "Value Creation Corr.": round(value_corr, 2),
             "Payout Influence Corr.": round(payout_corr, 2),
             "Alignment Gap": round(gap, 2),
@@ -259,6 +310,11 @@ sample_perf = pd.DataFrame({
 })
 sample_payout = pd.DataFrame({"Year": years, "Actual Payout": [0.55, 0.50, 1.00, 1.50, 1.00, 0.64, 2.00, 1.53, 0.26, 0.00]})
 sample_value = pd.DataFrame({"Year": years, "Stock Price Return": [0.12, 0.27, -0.30, 0.60, 0.04, 0.17, 0.16, 0.13, 0.12, -0.43]})
+sample_library = pd.DataFrame({
+    "Metric": ["Adjusted EBITDA", "Cash Flow Before Debt Reduction", "Revenue", "Gross Margin", "ROIC"],
+    "Category": ["Profitability", "Cash Flow", "Growth", "Profitability", "Returns"],
+    "Management Emphasis": [95, 90, 75, 65, 70],
+})
 
 # -----------------------------
 # App
@@ -268,16 +324,20 @@ st.caption("Company DNA. Incentive DNA. Alignment Gap. Design Lab. | Internal pi
 st.info("This version focuses on the evidence layer: which metrics appear most linked to shareholder value, which metrics drove payouts, and what alternative weighting would have tested better historically.")
 
 st.header("1. Import Data")
-col1, col2, col3 = st.columns(3)
+st.caption("Use the first three sections for the core analysis. The fourth section is optional and helps identify management-priority metrics from investor materials, proxy disclosure, or consultant-selected candidate metrics.")
+col1, col2 = st.columns(2)
 with col1:
-    perf_df = get_data_block("Performance Data", "Management / FP&A metrics. Use actual incentive-plan definitions where possible.", sample_perf)
+    perf_df = get_data_block("Performance Data", "Management / FP&A metrics or Capital IQ fields. Use actual incentive-plan definitions where available.", sample_perf)
 with col2:
     payout_df = get_data_block("Payout History", "Historical payouts as a percent of target. Use 1.25 or 125% for 125%.", sample_payout)
+col3, col4 = st.columns(2)
 with col3:
     value_df = get_data_block("Shareholder Value", "TSR, stock price return, market cap growth, or another selected outcome.", sample_value)
+with col4:
+    library_df = get_data_block("Management Priority Metrics", "Optional. Paste metrics emphasized in investor materials, proxy disclosure, or selected by the consultant. Columns can include Metric, Category, and Management Emphasis.", sample_library)
 
 if perf_df.empty or payout_df.empty or value_df.empty:
-    st.warning("Import all three datasets to continue. Paste from Excel, upload files, or use samples.")
+    st.warning("Import Performance Data, Payout History, and Shareholder Value to continue. The Management Priority Metrics section is optional.")
     st.stop()
 
 st.header("2. Map Data")
@@ -285,7 +345,6 @@ map1, map2, map3 = st.columns(3)
 with map1:
     perf_year = st.selectbox("Performance year column", perf_df.columns, key="perf_year")
     metric_candidates = numeric_candidate_cols(perf_df, [perf_year])
-    selected_metrics = st.multiselect("Performance metrics to evaluate", metric_candidates, default=metric_candidates[: min(6, len(metric_candidates))])
 with map2:
     payout_year = st.selectbox("Payout year column", payout_df.columns, key="payout_year")
     payout_candidates = numeric_candidate_cols(payout_df, [payout_year])
@@ -295,6 +354,39 @@ with map3:
     value_candidates = numeric_candidate_cols(value_df, [value_year])
     value_col = st.selectbox("Shareholder value column", value_candidates or list(value_df.columns), key="value_col")
 
+st.subheader("Management Priority Metrics Mapping (Optional)")
+metric_lookup = {}
+matched_priority_metrics = []
+if not library_df.empty:
+    l1, l2, l3 = st.columns(3)
+    with l1:
+        lib_metric_col = st.selectbox("Metric name column", library_df.columns, key="lib_metric_col")
+    with l2:
+        category_options = ["None"] + list(library_df.columns)
+        lib_category_col = st.selectbox("Category column", category_options, index=category_options.index("Category") if "Category" in category_options else 0, key="lib_category_col")
+    with l3:
+        emphasis_options = ["None"] + list(library_df.columns)
+        default_emphasis = "Management Emphasis" if "Management Emphasis" in emphasis_options else "None"
+        lib_emphasis_col = st.selectbox("Management emphasis / mention count column", emphasis_options, index=emphasis_options.index(default_emphasis), key="lib_emphasis_col")
+    metric_lookup = build_metric_library(
+        library_df,
+        lib_metric_col,
+        None if lib_category_col == "None" else lib_category_col,
+        None if lib_emphasis_col == "None" else lib_emphasis_col,
+    )
+    matched_priority_metrics = match_metric_library(metric_candidates, metric_lookup)
+    st.caption(f"Matched {len(matched_priority_metrics)} management-priority metrics to the performance data. Matching is currently based on exact metric names after basic cleanup.")
+
+default_metrics = matched_priority_metrics[:20] if matched_priority_metrics else metric_candidates[: min(8, len(metric_candidates))]
+selected_metrics = st.multiselect(
+    "Candidate metrics to analyze (select up to 20)",
+    metric_candidates,
+    default=default_metrics,
+    help="Use consultant judgment to pick the metrics that are plausible incentive-plan candidates for this company or industry.",
+)
+if len(selected_metrics) > 20:
+    st.error("Please select no more than 20 candidate metrics. This keeps the diagnostics focused and easier to explain.")
+    st.stop()
 if not selected_metrics:
     st.error("Select at least one performance metric.")
     st.stop()
@@ -319,7 +411,7 @@ if len(merged) < 8:
 
 # Diagnostics
 st.header("5. Historical Diagnostics")
-evidence = build_metric_evidence(merged, selected_metrics, directions)
+evidence = build_metric_evidence(merged, selected_metrics, directions, metric_lookup)
 
 m1, m2, m3 = st.columns(3)
 strong_value = evidence.sort_values("Value Creation Corr.", ascending=False).iloc[0]
@@ -333,7 +425,12 @@ st.subheader("Metric Evidence Scorecard")
 scorecard = evidence.copy()
 scorecard["Value Creation"] = scorecard["Value Creation Corr."].apply(lambda x: bar_stars(percentile_score(x)))
 scorecard["Payout Influence"] = scorecard["Payout Influence Corr."].apply(lambda x: bar_stars(percentile_score(x)))
-st.dataframe(scorecard[["Metric", "Value Creation Corr.", "Value Creation", "Payout Influence Corr.", "Payout Influence", "Alignment Gap", "Stability Score", "Metric Strength Score", "Direction"]], use_container_width=True)
+st.dataframe(scorecard[["Metric", "Category", "Management Priority Score", "Value Creation Corr.", "Value Creation", "Payout Influence Corr.", "Payout Influence", "Alignment Gap", "Stability Score", "Metric Strength Score", "Direction"]], use_container_width=True)
+
+if "Management Priority Score" in evidence.columns:
+    with st.expander("Management Priority Metrics", expanded=False):
+        st.write("This section reflects the optional metric library. Use it to compare what management emphasizes with what historically aligned with shareholder value and payouts.")
+        st.dataframe(evidence[["Metric", "Category", "Management Priority Score", "Value Creation Corr.", "Payout Influence Corr.", "Metric Strength Score"]].sort_values("Management Priority Score", ascending=False), use_container_width=True)
 
 c1, c2 = st.columns(2)
 with c1:
