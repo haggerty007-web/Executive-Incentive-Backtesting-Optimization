@@ -1,59 +1,38 @@
 import io
 import itertools
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 st.set_page_config(page_title="Executive Incentive Design Lab", layout="wide")
 
 # -----------------------------
-# Helpers
+# Utilities
 # -----------------------------
 def clean_col(c):
     return str(c).strip().replace("\n", " ").replace("  ", " ")
 
 
 def normalize_year_series(s: pd.Series) -> pd.Series:
-    """Return a clean calendar/fiscal year from common Excel inputs.
-
-    Handles:
-    - 2024
-    - "2024"
-    - "FY2024"
-    - "12/31/2024"
-    - true Excel/Pandas date values
-
-    Important: do NOT send a numeric year directly to pd.to_datetime first.
-    Pandas can interpret 2024 as 2024 nanoseconds after 1970, which creates
-    the 1970 bug you saw in the app.
-    """
     raw = s.copy()
-    as_text = raw.astype(str).str.strip()
-
-    # First, extract a clear 4-digit year from strings such as FY2024 or 12/31/2024.
-    extracted = as_text.str.extract(r"((?:19|20)\d{2})", expand=False)
+    txt = raw.astype(str).str.strip()
+    extracted = txt.str.extract(r"((?:19|20)\d{2})", expand=False)
     extracted_num = pd.to_numeric(extracted, errors="coerce")
-
-    # Next, handle numeric year values such as 2024.
-    numeric = pd.to_numeric(as_text.str.replace(",", "", regex=False), errors="coerce")
+    numeric = pd.to_numeric(txt.str.replace(",", "", regex=False), errors="coerce")
     numeric_year = numeric.where((numeric >= 1900) & (numeric <= 2100))
-
-    # Finally, handle actual date values that did not contain an obvious 4-digit year.
     dt = pd.to_datetime(raw, errors="coerce")
     date_year = dt.dt.year.where((dt.dt.year >= 1900) & (dt.dt.year <= 2100))
-
-    result = extracted_num.combine_first(numeric_year).combine_first(date_year)
-    return result.astype("Int64")
+    return extracted_num.combine_first(numeric_year).combine_first(date_year).astype("Int64")
 
 
 def parse_pasted_table(text: str) -> pd.DataFrame:
     text = text.strip()
     if not text:
         return pd.DataFrame()
-    # Excel copy/paste is usually tab-delimited. Fall back to comma if needed.
     sep = "\t" if "\t" in text else ","
     df = pd.read_csv(io.StringIO(text), sep=sep)
     df.columns = [clean_col(c) for c in df.columns]
@@ -83,7 +62,7 @@ def get_data_block(label: str, help_text: str, sample: pd.DataFrame) -> pd.DataF
     if mode == "Paste from Excel":
         text = st.text_area(
             f"Paste {label.lower()} here",
-            height=180,
+            height=160,
             key=f"paste_{label}",
             placeholder="Copy a range from Excel, including headers, then paste here.",
         )
@@ -95,29 +74,18 @@ def get_data_block(label: str, help_text: str, sample: pd.DataFrame) -> pd.DataF
         df = sample.copy()
     if not df.empty:
         st.success(f"Detected {len(df):,} rows and {len(df.columns):,} columns.")
-        st.dataframe(df.head(10), use_container_width=True)
+        st.dataframe(df.head(8), use_container_width=True)
     return df
-
-
-def numeric_candidate_cols(df: pd.DataFrame, exclude: List[str]) -> List[str]:
-    cols = []
-    for c in df.columns:
-        if c in exclude:
-            continue
-        converted = pd.to_numeric(
-            df[c].astype(str).str.replace("$", "", regex=False).str.replace(",", "", regex=False).str.replace("%", "", regex=False),
-            errors="coerce",
-        )
-        if converted.notna().sum() >= max(3, int(len(df) * 0.5)):
-            cols.append(c)
-    return cols
 
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     raw = series.astype(str).str.strip()
     has_pct = raw.str.contains("%", regex=False).any()
     out = pd.to_numeric(
-        raw.str.replace("$", "", regex=False).str.replace(",", "", regex=False).str.replace("%", "", regex=False),
+        raw.str.replace("$", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.replace("x", "", regex=False),
         errors="coerce",
     )
     if has_pct:
@@ -125,35 +93,15 @@ def clean_numeric(series: pd.Series) -> pd.Series:
     return out
 
 
-def merge_by_year(perf: pd.DataFrame, payouts: pd.DataFrame, value: pd.DataFrame, perf_year: str, payout_year: str, payout_col: str, value_year: str, value_col: str, metrics: List[str]) -> pd.DataFrame:
-    # Use a temporary normalized year column so we do not accidentally drop Year
-    # when the selected source column is already named Year.
-    p = perf[[perf_year] + metrics].copy()
-    p["__Year__"] = normalize_year_series(p[perf_year])
-    for c in metrics:
-        p[c] = clean_numeric(p[c])
-    p = p[["__Year__"] + metrics].rename(columns={"__Year__": "Year"})
-
-    pay = payouts[[payout_year, payout_col]].copy()
-    pay["__Year__"] = normalize_year_series(pay[payout_year])
-    pay["Actual Payout"] = clean_numeric(pay[payout_col])
-    pay = pay[["__Year__", "Actual Payout"]].rename(columns={"__Year__": "Year"})
-
-    v = value[[value_year, value_col]].copy()
-    v["__Year__"] = normalize_year_series(v[value_year])
-    v["Shareholder Value"] = clean_numeric(v[value_col])
-    v = v[["__Year__", "Shareholder Value"]].rename(columns={"__Year__": "Year"})
-
-    p = p.dropna(subset=["Year"])
-    pay = pay.dropna(subset=["Year"])
-    v = v.dropna(subset=["Year"])
-
-    p["Year"] = p["Year"].astype(int)
-    pay["Year"] = pay["Year"].astype(int)
-    v["Year"] = v["Year"].astype(int)
-
-    merged = p.merge(pay, on="Year", how="inner").merge(v, on="Year", how="inner")
-    return merged.sort_values("Year").dropna(subset=["Year"])
+def numeric_candidate_cols(df: pd.DataFrame, exclude: List[str]) -> List[str]:
+    cols = []
+    for c in df.columns:
+        if c in exclude:
+            continue
+        converted = clean_numeric(df[c])
+        if converted.notna().sum() >= max(3, int(len(df) * 0.5)):
+            cols.append(c)
+    return cols
 
 
 def safe_corr(a, b) -> float:
@@ -165,30 +113,120 @@ def safe_corr(a, b) -> float:
     return float(np.corrcoef(x[mask], y[mask])[0, 1])
 
 
-def metric_score(series: pd.Series, direction: str) -> pd.Series:
+def metric_signal(series: pd.Series, direction: str) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
     change = s.pct_change().replace([np.inf, -np.inf], np.nan)
     if direction == "Lower is better":
         change = -change
-    # target range will be treated as stability around history for now
-    if direction == "Target range / stability":
-        change = -abs((s - s.median()) / max(abs(s.median()), 1e-9))
+    elif direction == "Target range / stability":
+        median = s.median()
+        denom = max(abs(median), 1e-9)
+        change = -abs((s - median) / denom)
     return change
 
 
-def payout_curve(score: float, threshold: float, target: float, maximum: float, threshold_payout: float, maximum_payout: float) -> float:
+def merge_data(perf, payouts, value, perf_year, payout_year, payout_col, value_year, value_col, metrics):
+    p = perf[[perf_year] + metrics].copy()
+    p["Year"] = normalize_year_series(p[perf_year])
+    for c in metrics:
+        p[c] = clean_numeric(p[c])
+    p = p[["Year"] + metrics]
+
+    pay = payouts[[payout_year, payout_col]].copy()
+    pay["Year"] = normalize_year_series(pay[payout_year])
+    pay["Actual Payout"] = clean_numeric(pay[payout_col])
+    pay = pay[["Year", "Actual Payout"]]
+
+    v = value[[value_year, value_col]].copy()
+    v["Year"] = normalize_year_series(v[value_year])
+    v["Shareholder Value"] = clean_numeric(v[value_col])
+    v = v[["Year", "Shareholder Value"]]
+
+    for d in [p, pay, v]:
+        d.dropna(subset=["Year"], inplace=True)
+        d["Year"] = d["Year"].astype(int)
+
+    merged = p.merge(pay, on="Year", how="inner").merge(v, on="Year", how="inner")
+    return merged.sort_values("Year").reset_index(drop=True)
+
+
+def percentile_score(x: float) -> float:
+    # Convert correlation-like values to 0-100, preserving positive evidence.
+    return max(0.0, min(100.0, (x + 1) * 50))
+
+
+def build_metric_evidence(df, metrics, directions):
+    rows = []
+    payout_std = df["Actual Payout"].std()
+    for m in metrics:
+        sig = metric_signal(df[m], directions[m])
+        value_corr = safe_corr(sig, df["Shareholder Value"])
+        payout_corr = safe_corr(sig, df["Actual Payout"])
+        metric_vol = sig.std(skipna=True)
+        stability = 100 if pd.isna(metric_vol) else max(0, 100 - min(metric_vol, 1.0) * 100)
+        value_score = percentile_score(value_corr)
+        payout_score = percentile_score(payout_corr)
+        # Value alignment gets more weight than payout alignment.
+        overall = value_score * 0.50 + payout_score * 0.25 + stability * 0.15 + 10
+        gap = payout_corr - value_corr
+        rows.append({
+            "Metric": m,
+            "Value Creation Corr.": round(value_corr, 2),
+            "Payout Influence Corr.": round(payout_corr, 2),
+            "Alignment Gap": round(gap, 2),
+            "Stability Score": round(stability, 0),
+            "Metric Strength Score": round(min(overall, 100), 1),
+            "Direction": directions[m],
+        })
+    return pd.DataFrame(rows).sort_values("Metric Strength Score", ascending=False)
+
+
+def payout_curve(score, threshold=0.90, target=1.00, maximum=1.20, threshold_payout=0.50, max_payout=2.00):
     if pd.isna(score):
         return np.nan
     if score < threshold:
         return 0.0
     if score < target:
-        return threshold_payout + ((score - threshold) / (target - threshold)) * (1.0 - threshold_payout)
+        return threshold_payout + ((score - threshold) / max(target - threshold, 1e-9)) * (1.0 - threshold_payout)
     if score < maximum:
-        return 1.0 + ((score - target) / (maximum - target)) * (maximum_payout - 1.0)
-    return maximum_payout
+        return 1.0 + ((score - target) / max(maximum - target, 1e-9)) * (max_payout - 1.0)
+    return max_payout
 
 
-def generate_weight_sets(metrics: List[str], step: int, max_metrics: int) -> List[Dict[str, float]]:
+def modeled_payout(df, weights, directions, threshold, target, maximum, threshold_payout, max_payout):
+    score = pd.Series(0.0, index=df.index)
+    for m, w in weights.items():
+        score += (1 + metric_signal(df[m], directions[m])) * w
+    return score.apply(lambda x: payout_curve(x, threshold, target, maximum, threshold_payout, max_payout))
+
+
+def evaluate_plan(df, weights, directions, threshold, target, maximum, threshold_payout, max_payout):
+    pred = modeled_payout(df, weights, directions, threshold, target, maximum, threshold_payout, max_payout)
+    mask = pred.notna() & df["Actual Payout"].notna() & df["Shareholder Value"].notna()
+    if mask.sum() < 3:
+        return None
+    actual = df.loc[mask, "Actual Payout"]
+    value = df.loc[mask, "Shareholder Value"]
+    pred = pred[mask]
+    fit = safe_corr(pred, actual)
+    value_corr = safe_corr(pred, value)
+    avg_payout = pred.mean()
+    vol = pred.std()
+    avg_error = (pred - actual).abs().mean()
+    cost_neutrality = max(0, 1 - abs(avg_payout - actual.mean()) / max(abs(actual.mean()), 0.01))
+    stability = max(0, 1 - vol / max(actual.std(), 0.01)) if actual.std() > 0 else 0
+    quality = max(value_corr, 0) * 45 + max(fit, 0) * 20 + cost_neutrality * 20 + stability * 15
+    return {
+        "Plan Quality Score": round(quality, 1),
+        "Value Alignment": round(value_corr, 2),
+        "Payout Fit": round(fit, 2),
+        "Avg Payout": round(avg_payout, 2),
+        "Volatility": round(vol, 2),
+        "Avg Error": round(avg_error, 2),
+    }
+
+
+def generate_weight_sets(metrics, step=25, max_metrics=3):
     values = list(range(step, 101, step))
     out = []
     for r in range(1, min(max_metrics, len(metrics)) + 1):
@@ -202,99 +240,66 @@ def generate_weight_sets(metrics: List[str], step: int, max_metrics: int) -> Lis
     return out
 
 
-def modeled_payout(df: pd.DataFrame, weights: Dict[str, float], directions: Dict[str, str], threshold: float, target: float, maximum: float, threshold_payout: float, maximum_payout: float) -> pd.Series:
-    parts = []
-    for m, w in weights.items():
-        parts.append((1 + metric_score(df[m], directions.get(m, "Higher is better"))) * w)
-    perf_score = sum(parts)
-    return perf_score.apply(lambda x: payout_curve(x, threshold, target, maximum, threshold_payout, maximum_payout))
-
-
-def evaluate_plan(df: pd.DataFrame, weights: Dict[str, float], directions: Dict[str, str], threshold: float, target: float, maximum: float, threshold_payout: float, maximum_payout: float) -> Dict[str, float]:
-    pred = modeled_payout(df, weights, directions, threshold, target, maximum, threshold_payout, maximum_payout)
-    actual = df["Actual Payout"]
-    value = df["Shareholder Value"]
-    mask = pred.notna() & actual.notna() & value.notna()
-    if mask.sum() < 3:
-        return {"fit_corr": 0, "value_corr": 0, "avg_payout": 0, "volatility": 0, "avg_error": 0, "score": 0}
-    fit_corr = safe_corr(pred[mask], actual[mask])
-    value_corr = safe_corr(pred[mask], value[mask])
-    avg_payout = float(pred[mask].mean())
-    volatility = float(pred[mask].std())
-    avg_error = float((pred[mask] - actual[mask]).abs().mean())
-    cost_score = max(0, 1 - abs(avg_payout - actual[mask].mean()) / max(actual[mask].mean(), 0.01))
-    stability_score = max(0, 1 - volatility / max(actual[mask].std(), 0.01)) if actual[mask].std() > 0 else 0
-    score = max(fit_corr, 0) * 30 + max(value_corr, 0) * 40 + cost_score * 20 + stability_score * 10
-    return {
-        "fit_corr": round(fit_corr, 2),
-        "value_corr": round(value_corr, 2),
-        "avg_payout": round(avg_payout, 2),
-        "volatility": round(volatility, 2),
-        "avg_error": round(avg_error, 2),
-        "score": round(score, 1),
-    }
+def bar_stars(score):
+    stars = int(round(score / 20))
+    return "★" * stars + "☆" * (5 - stars)
 
 
 # -----------------------------
-# Sample data
+# Samples
 # -----------------------------
-years = list(range(2011, 2025))
+years = list(range(2016, 2026))
 sample_perf = pd.DataFrame({
     "Year": years,
-    "Adjusted EBITDA": [188,197,214,230,215,238,260,282,302,315,345,390,420,400],
-    "Cash Flow Before Debt Reduction": [86,90,100,115,95,120,132,148,165,162,175,210,225,190],
-    "Revenue": [1035,1070,1125,1180,1160,1215,1280,1350,1425,1480,1560,1660,1740,1700],
-    "ROIC": [0.098,0.101,0.108,0.113,0.102,0.116,0.123,0.130,0.138,0.135,0.145,0.152,0.160,0.150],
+    "Adjusted EBITDA": [737, 707, 920, 978, 913, 1042, 1600, 1870, 1683, 228],
+    "Cash Flow Before Debt Reduction": [232, 291, -40, 439, 63, -99, 467, 304, 69, -153],
+    "Revenue": [4298, 4406, 6029, 6160, 6560, 7156, 9440, 9428, 8807, 2156],
+    "Gross Margin": [0.19, 0.16, 0.16, 0.18, 0.17, 0.15, 0.19, 0.23, 0.23, 0.14],
+    "ROIC": [0.0529, 0.0610, 0.0248, 0.0175, 0.0115, 0.0164, 0.0551, 0.0747, 0.0635, -0.0329],
 })
-sample_payout = pd.DataFrame({"Year": years, "Actual Payout": [0.95,1.05,1.20,1.35,0.70,1.25,1.45,1.60,1.55,1.00,0.64,2.00,1.53,0.26]})
-sample_value = pd.DataFrame({"Year": years, "TSR": [0.04,0.12,0.18,0.22,-0.10,0.16,0.20,0.24,0.18,0.04,0.16,0.11,0.13,-0.08]})
+sample_payout = pd.DataFrame({"Year": years, "Actual Payout": [0.55, 0.50, 1.00, 1.50, 1.00, 0.64, 2.00, 1.53, 0.26, 0.00]})
+sample_value = pd.DataFrame({"Year": years, "Stock Price Return": [0.12, 0.27, -0.30, 0.60, 0.04, 0.17, 0.16, 0.13, 0.12, -0.43]})
 
 # -----------------------------
 # App
 # -----------------------------
 st.title("Executive Incentive Design Lab")
-st.caption("Backtest. Optimize. Validate. | Internal pilot")
-st.info("Paste directly from Excel or upload files. The app merges performance, payout, and shareholder value data by year.")
-
-with st.expander("Download / copy template format", expanded=False):
-    st.write("Performance data can contain any company-specific metrics. Payout and shareholder value data only need Year plus one value column.")
-    st.dataframe(sample_perf.head(), use_container_width=True)
-    st.dataframe(sample_payout.head(), use_container_width=True)
-    st.dataframe(sample_value.head(), use_container_width=True)
+st.caption("Company DNA. Incentive DNA. Alignment Gap. Design Lab. | Internal pilot")
+st.info("This version focuses on the evidence layer: which metrics appear most linked to shareholder value, which metrics drove payouts, and what alternative weighting would have tested better historically.")
 
 st.header("1. Import Data")
-colA, colB, colC = st.columns(3)
-with colA:
-    perf_df = get_data_block("Performance Data", "Use adjusted management metrics from FP&A or comp plan workbooks.", sample_perf)
-with colB:
-    payout_df = get_data_block("Payout History", "Use actual incentive payouts as a percent of target. Example: 1.25 = 125%.", sample_payout)
-with colC:
-    value_df = get_data_block("Shareholder Value", "Use TSR, stock price return, market cap growth, or other selected outcome measure.", sample_value)
+col1, col2, col3 = st.columns(3)
+with col1:
+    perf_df = get_data_block("Performance Data", "Management / FP&A metrics. Use actual incentive-plan definitions where possible.", sample_perf)
+with col2:
+    payout_df = get_data_block("Payout History", "Historical payouts as a percent of target. Use 1.25 or 125% for 125%.", sample_payout)
+with col3:
+    value_df = get_data_block("Shareholder Value", "TSR, stock price return, market cap growth, or another selected outcome.", sample_value)
 
 if perf_df.empty or payout_df.empty or value_df.empty:
-    st.warning("Import all three datasets to continue. You can paste from Excel, upload files, or use the samples.")
+    st.warning("Import all three datasets to continue. Paste from Excel, upload files, or use samples.")
     st.stop()
 
-st.header("2. Map Columns")
+st.header("2. Map Data")
 map1, map2, map3 = st.columns(3)
 with map1:
     perf_year = st.selectbox("Performance year column", perf_df.columns, key="perf_year")
-    metric_cols = numeric_candidate_cols(perf_df, [perf_year])
-    selected_metrics = st.multiselect("Candidate performance metrics", metric_cols, default=metric_cols[: min(6, len(metric_cols))])
+    metric_candidates = numeric_candidate_cols(perf_df, [perf_year])
+    selected_metrics = st.multiselect("Performance metrics to evaluate", metric_candidates, default=metric_candidates[: min(6, len(metric_candidates))])
 with map2:
     payout_year = st.selectbox("Payout year column", payout_df.columns, key="payout_year")
     payout_candidates = numeric_candidate_cols(payout_df, [payout_year])
-    payout_col = st.selectbox("Actual payout column", payout_candidates or payout_df.columns, key="payout_col")
+    payout_col = st.selectbox("Actual payout column", payout_candidates or list(payout_df.columns), key="payout_col")
 with map3:
     value_year = st.selectbox("Shareholder value year column", value_df.columns, key="value_year")
     value_candidates = numeric_candidate_cols(value_df, [value_year])
-    value_col = st.selectbox("Shareholder value column", value_candidates or value_df.columns, key="value_col")
+    value_col = st.selectbox("Shareholder value column", value_candidates or list(value_df.columns), key="value_col")
 
 if not selected_metrics:
     st.error("Select at least one performance metric.")
     st.stop()
 
-st.header("3. Define Metric Behavior")
+st.header("3. Metric Behavior")
 directions = {}
 cols = st.columns(3)
 for i, m in enumerate(selected_metrics):
@@ -302,98 +307,170 @@ for i, m in enumerate(selected_metrics):
         directions[m] = st.selectbox(m, ["Higher is better", "Lower is better", "Target range / stability"], key=f"dir_{m}")
 
 try:
-    merged = merge_by_year(perf_df, payout_df, value_df, perf_year, payout_year, payout_col, value_year, value_col, selected_metrics)
+    merged = merge_data(perf_df, payout_df, value_df, perf_year, payout_year, payout_col, value_year, value_col, selected_metrics)
 except Exception as exc:
     st.error(f"Could not merge the data: {exc}")
     st.stop()
 
-st.header("4. Merged Modeling Dataset")
+st.header("4. Modeling Dataset")
 st.dataframe(merged, use_container_width=True)
-if len(merged) < 5:
-    st.warning("Fewer than 5 matched years were found. Results may not be reliable.")
+if len(merged) < 8:
+    st.warning("Small sample size. Use results directionally. Annual incentive history often has limited observations, so consultant judgment remains important.")
 
 # Diagnostics
 st.header("5. Historical Diagnostics")
-diag_rows = []
-for m in selected_metrics:
-    metric_perf = metric_score(merged[m], directions[m])
-    diag_rows.append({
-        "Metric": m,
-        "Correlation to Payout": round(safe_corr(metric_perf, merged["Actual Payout"]), 2),
-        "Correlation to Shareholder Value": round(safe_corr(metric_perf, merged["Shareholder Value"]), 2),
-    })
-diag = pd.DataFrame(diag_rows).sort_values("Correlation to Shareholder Value", ascending=False)
-st.dataframe(diag, use_container_width=True)
-fig = px.bar(diag, x="Correlation to Shareholder Value", y="Metric", orientation="h", title="Which metrics were most associated with shareholder value?")
-st.plotly_chart(fig, use_container_width=True, key="diag_value_chart")
+evidence = build_metric_evidence(merged, selected_metrics, directions)
 
-# Plan inputs
-st.header("6. Current Plan Backtest")
-st.caption("Enter the current or proposed plan weights. Leave weights at 0% for metrics that are not in the plan.")
-threshold = st.number_input("Threshold performance", value=0.90, step=0.05)
-target = st.number_input("Target performance", value=1.00, step=0.05)
-maximum = st.number_input("Maximum performance", value=1.20, step=0.05)
-threshold_payout = st.number_input("Threshold payout", value=0.50, step=0.05)
-maximum_payout = st.number_input("Maximum payout", value=2.00, step=0.05)
+m1, m2, m3 = st.columns(3)
+strong_value = evidence.sort_values("Value Creation Corr.", ascending=False).iloc[0]
+strong_payout = evidence.sort_values("Payout Influence Corr.", ascending=False).iloc[0]
+strong_metric = evidence.iloc[0]
+m1.metric("Company DNA", strong_value["Metric"], f"Value corr. {strong_value['Value Creation Corr.']}")
+m2.metric("Incentive DNA", strong_payout["Metric"], f"Payout corr. {strong_payout['Payout Influence Corr.']}")
+m3.metric("Top Metric Score", strong_metric["Metric"], f"{strong_metric['Metric Strength Score']}/100")
 
+st.subheader("Metric Evidence Scorecard")
+scorecard = evidence.copy()
+scorecard["Value Creation"] = scorecard["Value Creation Corr."].apply(lambda x: bar_stars(percentile_score(x)))
+scorecard["Payout Influence"] = scorecard["Payout Influence Corr."].apply(lambda x: bar_stars(percentile_score(x)))
+st.dataframe(scorecard[["Metric", "Value Creation Corr.", "Value Creation", "Payout Influence Corr.", "Payout Influence", "Alignment Gap", "Stability Score", "Metric Strength Score", "Direction"]], use_container_width=True)
+
+c1, c2 = st.columns(2)
+with c1:
+    figv = px.bar(evidence.sort_values("Value Creation Corr."), x="Value Creation Corr.", y="Metric", orientation="h", title=f"Metrics Most Associated with {value_col}")
+    st.plotly_chart(figv, use_container_width=True, key="value_corr_chart")
+with c2:
+    figp = px.bar(evidence.sort_values("Payout Influence Corr."), x="Payout Influence Corr.", y="Metric", orientation="h", title="Metrics Most Associated with Actual Payouts")
+    st.plotly_chart(figp, use_container_width=True, key="payout_corr_chart")
+
+st.subheader("Alignment Gap")
+gap = evidence.copy().sort_values("Alignment Gap", ascending=False)
+figg = go.Figure()
+figg.add_trace(go.Bar(name="Value Creation", x=gap["Metric"], y=gap["Value Creation Corr."]))
+figg.add_trace(go.Bar(name="Payout Influence", x=gap["Metric"], y=gap["Payout Influence Corr."]))
+figg.update_layout(barmode="group", title="What Investors Rewarded vs. What the Plan Rewarded", yaxis_title="Correlation", height=420)
+st.plotly_chart(figg, use_container_width=True, key="alignment_gap_chart")
+
+if strong_value["Metric"] != strong_payout["Metric"]:
+    st.warning(f"Initial insight: {strong_value['Metric']} appears most associated with shareholder value, while {strong_payout['Metric']} appears most associated with actual payouts. That gap is worth discussing before optimizing plan design.")
+else:
+    st.success(f"Initial insight: {strong_value['Metric']} appears to be important for both shareholder value and payout outcomes.")
+
+# Metric cards
+st.header("6. Metric Cards")
+metric_choice = st.selectbox("Select metric card", evidence["Metric"].tolist())
+row = evidence[evidence["Metric"] == metric_choice].iloc[0]
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Value Creation", row["Value Creation Corr."])
+k2.metric("Payout Influence", row["Payout Influence Corr."])
+k3.metric("Alignment Gap", row["Alignment Gap"])
+k4.metric("Metric Strength", f"{row['Metric Strength Score']}/100")
+if row["Value Creation Corr."] > 0.5:
+    st.write(f"**Consultant note:** {metric_choice} has shown a relatively strong historical relationship with the selected shareholder value measure.")
+elif row["Value Creation Corr."] > 0.2:
+    st.write(f"**Consultant note:** {metric_choice} has shown a moderate relationship with shareholder value. Consider it alongside strategy, controllability, and goal-setting quality.")
+else:
+    st.write(f"**Consultant note:** {metric_choice} has not shown a strong historical relationship with the selected shareholder value measure in this dataset.")
+
+# Current plan and alternative design lab
+st.header("7. Current Plan vs. Alternative Design Lab")
+st.caption("Use this to compare a current/proposed plan against alternative metric mixes. This is still a historical test, not a definitive recommendation.")
+
+with st.expander("Payout curve assumptions", expanded=False):
+    a, b, c, d, e = st.columns(5)
+    with a:
+        threshold = st.number_input("Threshold performance", value=0.90, step=0.05)
+    with b:
+        target = st.number_input("Target performance", value=1.00, step=0.05)
+    with c:
+        maximum = st.number_input("Maximum performance", value=1.20, step=0.05)
+    with d:
+        threshold_payout = st.number_input("Threshold payout", value=0.50, step=0.05)
+    with e:
+        max_payout = st.number_input("Maximum payout", value=2.00, step=0.05)
+
+st.subheader("Current / Proposed Plan Weights")
 weights = {}
 wcols = st.columns(3)
 for i, m in enumerate(selected_metrics):
     with wcols[i % 3]:
-        weights[m] = st.slider(f"Weight: {m}", 0, 100, 0, 5) / 100
+        weights[m] = st.slider(f"Weight: {m}", 0, 100, 0, 5, key=f"weight_{m}") / 100
 
-weight_sum = sum(weights.values())
-if weight_sum == 0:
-    # default to equal weights for convenience
-    equal = 1 / len(selected_metrics)
-    current_weights = {m: equal for m in selected_metrics}
-    st.info("No plan weights entered yet. Using equal weights for preview.")
-elif abs(weight_sum - 1) > 0.001:
-    current_weights = {m: w / weight_sum for m, w in weights.items() if w > 0}
-    st.warning(f"Weights total {weight_sum:.0%}; the app normalized them to 100% for modeling.")
+if sum(weights.values()) == 0:
+    active_weights = {m: 1 / len(selected_metrics) for m in selected_metrics}
+    st.info("No weights entered yet. Using equal weights as a preview.")
+elif abs(sum(weights.values()) - 1.0) > 0.001:
+    active_weights = {m: w / sum(weights.values()) for m, w in weights.items() if w > 0}
+    st.warning("Weights do not total 100%. The app normalized active weights for modeling.")
 else:
-    current_weights = {m: w for m, w in weights.items() if w > 0}
+    active_weights = {m: w for m, w in weights.items() if w > 0}
 
-current_stats = evaluate_plan(merged, current_weights, directions, threshold, target, maximum, threshold_payout, maximum_payout)
-pred = modeled_payout(merged, current_weights, directions, threshold, target, maximum, threshold_payout, maximum_payout)
-compare = merged[["Year", "Actual Payout", "Shareholder Value"]].copy()
-compare["Modeled Payout"] = pred
-compare["Error"] = compare["Modeled Payout"] - compare["Actual Payout"]
+current_stats = evaluate_plan(merged, active_weights, directions, threshold, target, maximum, threshold_payout, max_payout)
+if current_stats:
+    curr_pred = modeled_payout(merged, active_weights, directions, threshold, target, maximum, threshold_payout, max_payout)
+    compare = merged[["Year", "Actual Payout", "Shareholder Value"]].copy()
+    compare["Modeled Current Plan"] = curr_pred
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Current Plan Quality", current_stats["Plan Quality Score"])
+    s2.metric("Value Alignment", current_stats["Value Alignment"])
+    s3.metric("Avg Payout", f"{current_stats['Avg Payout']:.0%}")
+    s4.metric("Volatility", f"{current_stats['Volatility']:.0%}")
+    figc = px.line(compare, x="Year", y=["Actual Payout", "Modeled Current Plan"], markers=True, title="Actual Payout vs. Modeled Current Plan")
+    st.plotly_chart(figc, use_container_width=True, key="current_plan_chart")
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Payout Fit", current_stats["fit_corr"])
-c2.metric("Value Alignment", current_stats["value_corr"])
-c3.metric("Avg Payout", f"{current_stats['avg_payout']:.0%}")
-c4.metric("Avg Error", f"{current_stats['avg_error']:.0%}")
-st.dataframe(compare, use_container_width=True)
-fig2 = px.line(compare, x="Year", y=["Actual Payout", "Modeled Payout"], markers=True, title="Actual vs. Modeled Payout")
-st.plotly_chart(fig2, use_container_width=True, key="actual_vs_modeled_chart")
-
-# Optimization
-st.header("7. Optimization")
-colx, coly = st.columns(2)
-with colx:
+st.subheader("Find Better Historical Designs")
+o1, o2, o3 = st.columns(3)
+with o1:
     max_metrics = st.slider("Maximum metrics per plan", 1, min(5, len(selected_metrics)), min(3, len(selected_metrics)))
-with coly:
-    step = st.selectbox("Weighting increment", [10, 20, 25, 50], index=2)
+with o2:
+    step = st.selectbox("Weight increment", [10, 20, 25, 50], index=2)
+with o3:
+    objective = st.selectbox("Primary objective", ["Balanced", "Maximize shareholder alignment", "Maintain payout cost", "Reduce volatility"])
 
-if st.button("Run Optimization"):
+required_metric = st.selectbox("Optional required metric", ["None"] + selected_metrics)
+
+if st.button("Run Design Lab"):
     plans = []
     for wset in generate_weight_sets(selected_metrics, step, max_metrics):
-        stats = evaluate_plan(merged, wset, directions, threshold, target, maximum, threshold_payout, maximum_payout)
+        if required_metric != "None" and required_metric not in wset:
+            continue
+        stats = evaluate_plan(merged, wset, directions, threshold, target, maximum, threshold_payout, max_payout)
+        if not stats:
+            continue
+        if objective == "Maximize shareholder alignment":
+            rank_score = max(stats["Value Alignment"], 0) * 100
+        elif objective == "Maintain payout cost":
+            rank_score = 100 - abs(stats["Avg Payout"] - merged["Actual Payout"].mean()) * 100
+        elif objective == "Reduce volatility":
+            rank_score = 100 - stats["Volatility"] * 100
+        else:
+            rank_score = stats["Plan Quality Score"]
+        stats["Rank Score"] = round(rank_score, 1)
         stats["Metric Mix"] = " / ".join([f"{int(v*100)}% {k}" for k, v in wset.items()])
         plans.append(stats)
-    opt = pd.DataFrame(plans).sort_values("score", ascending=False)
+    opt = pd.DataFrame(plans).sort_values("Rank Score", ascending=False)
     st.subheader("Top Alternative Designs")
     st.dataframe(opt.head(25), use_container_width=True)
-    best = opt.iloc[0]
-    st.success(f"Top design: {best['Metric Mix']}")
 
-    st.subheader("8. Draft Consultant Takeaway")
-    strongest_value = diag.iloc[0]["Metric"]
-    strongest_payout = diag.sort_values("Correlation to Payout", ascending=False).iloc[0]["Metric"]
-    if strongest_value == strongest_payout:
-        msg = f"Historical analysis indicates {strongest_value} was the strongest tested metric for both shareholder value alignment and historical payout behavior. This suggests the plan direction is broadly aligned, subject to further review of goal rigor, payout curves, and business context."
-    else:
-        msg = f"Historical analysis indicates shareholder value was most closely associated with {strongest_value}, while actual payouts were more closely associated with {strongest_payout}. This may indicate an opportunity to revisit metric weighting or plan design to strengthen alignment with shareholder value creation."
-    st.write(msg)
+    if not opt.empty:
+        best = opt.iloc[0]
+        st.success(f"Top design under selected objective: {best['Metric Mix']}")
+        if current_stats:
+            comp = pd.DataFrame([
+                {"Design": "Current / Proposed", **current_stats},
+                {"Design": "Top Alternative", **{k: best[k] for k in ["Plan Quality Score", "Value Alignment", "Payout Fit", "Avg Payout", "Volatility", "Avg Error"]}},
+            ])
+            st.subheader("Current vs. Top Alternative")
+            st.dataframe(comp, use_container_width=True)
+
+        st.subheader("Draft Consultant Takeaway")
+        if strong_value["Metric"] == strong_payout["Metric"]:
+            msg = f"Historical diagnostics indicate {strong_value['Metric']} has been the strongest tested metric for both shareholder value alignment and actual payout behavior. The design lab can be used to evaluate whether increasing or preserving emphasis on this metric improves alignment while maintaining a reasonable payout profile."
+        else:
+            msg = f"Historical diagnostics indicate {strong_value['Metric']} has shown the strongest relationship with the selected shareholder value measure, while {strong_payout['Metric']} has had the strongest relationship with actual payouts. This suggests a potential alignment gap. The top alternative design increases emphasis on the metrics that have historically shown stronger value linkage, subject to review of strategy, controllability, goal rigor, and disclosure considerations."
+        st.write(msg)
+
+        csv = opt.to_csv(index=False).encode("utf-8")
+        st.download_button("Download design lab results", csv, "design_lab_results.csv", "text/csv")
+
+st.caption("Internal pilot. Results are directional and should supplement consultant judgment, not replace it.")
