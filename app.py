@@ -100,21 +100,31 @@ def clean_numeric(series: pd.Series) -> pd.Series:
 
 
 def merge_by_year(perf: pd.DataFrame, payouts: pd.DataFrame, value: pd.DataFrame, perf_year: str, payout_year: str, payout_col: str, value_year: str, value_col: str, metrics: List[str]) -> pd.DataFrame:
+    # Use a temporary normalized year column so we do not accidentally drop Year
+    # when the selected source column is already named Year.
     p = perf[[perf_year] + metrics].copy()
-    p["Year"] = normalize_year_series(p[perf_year])
-    p = p.drop(columns=[perf_year])
+    p["__Year__"] = normalize_year_series(p[perf_year])
     for c in metrics:
         p[c] = clean_numeric(p[c])
+    p = p[["__Year__"] + metrics].rename(columns={"__Year__": "Year"})
 
     pay = payouts[[payout_year, payout_col]].copy()
-    pay["Year"] = normalize_year_series(pay[payout_year])
+    pay["__Year__"] = normalize_year_series(pay[payout_year])
     pay["Actual Payout"] = clean_numeric(pay[payout_col])
-    pay = pay[["Year", "Actual Payout"]]
+    pay = pay[["__Year__", "Actual Payout"]].rename(columns={"__Year__": "Year"})
 
     v = value[[value_year, value_col]].copy()
-    v["Year"] = normalize_year_series(v[value_year])
+    v["__Year__"] = normalize_year_series(v[value_year])
     v["Shareholder Value"] = clean_numeric(v[value_col])
-    v = v[["Year", "Shareholder Value"]]
+    v = v[["__Year__", "Shareholder Value"]].rename(columns={"__Year__": "Year"})
+
+    p = p.dropna(subset=["Year"])
+    pay = pay.dropna(subset=["Year"])
+    v = v.dropna(subset=["Year"])
+
+    p["Year"] = p["Year"].astype(int)
+    pay["Year"] = pay["Year"].astype(int)
+    v["Year"] = v["Year"].astype(int)
 
     merged = p.merge(pay, on="Year", how="inner").merge(v, on="Year", how="inner")
     return merged.sort_values("Year").dropna(subset=["Year"])
