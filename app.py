@@ -1116,7 +1116,7 @@ if "driver_df" in st.session_state and not st.session_state.driver_df.empty:
     st.sidebar.success(f"Driver data saved: {len(st.session_state.driver_df)} rows")
 
 st.title("Executive Incentive Design Lab V3")
-st.caption("Metric Object Engine | Transformation Rules | Current vs Alternative Incentive Metrics")
+st.caption("Metric Object Engine | Transformation Rules | Current vs Alternative Incentive Metrics | HOTFIX: Recommendation functions loaded")
 
 if page=="1. Import Data":
     st.header("1. Import Data")
