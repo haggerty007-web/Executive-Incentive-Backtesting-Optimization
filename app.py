@@ -902,6 +902,201 @@ def build_why_not_table(reco_df):
         })
     return pd.DataFrame(rows)
 
+
+
+def classify_metric_readiness(row):
+    has_quant = False
+    for col in ["Current Corr.", "Lagged Corr.", "Rolling 3Y Corr.", "Payout Corr."]:
+        if col in row and pd.notna(row[col]):
+            has_quant = True
+    if has_quant:
+        return "Ready"
+    if row.get("Driver Evidence Score", 0) >= 50 or row.get("Management Score", 0) >= 70:
+        return "Needs annual values"
+    return "Review"
+
+
+def build_candidate_metric_objects(score_df, current_metrics):
+    if score_df is None or score_df.empty:
+        return pd.DataFrame()
+    df = build_recommendation_universe(score_df, current_metrics, st.session_state.driver_linkage_df).copy()
+    df["Readiness"] = df.apply(classify_metric_readiness, axis=1)
+
+    def action(row):
+        if row.get("Current Plan Metric", False):
+            return "Retain / review"
+        rec = row.get("Recommendation", "")
+        readiness = row.get("Readiness", "")
+        if rec == "Strong candidate" and readiness == "Ready":
+            return "Add / test in plan"
+        if rec in ["Strong candidate", "Consider"] and readiness == "Ready":
+            return "Consider in alternative"
+        if readiness == "Needs annual values":
+            return "Collect annual values"
+        return "Keep as background evidence"
+
+    def evidence_bucket(row):
+        parts = []
+        if pd.notna(row.get("Directional Corr.", np.nan)):
+            parts.append("Financial")
+        if row.get("Management Score", 0) > 0:
+            parts.append("Management")
+        if row.get("Driver Evidence Score", 0) > 0:
+            parts.append("Driver")
+        if row.get("Design Fit", 0) > 0:
+            parts.append("Design")
+        return " + ".join(parts) if parts else "Limited"
+
+    def role(row):
+        cat = str(row.get("Category", ""))
+        metric = str(row.get("Metric", "")).lower()
+        if "capital" in cat.lower() or "roic" in metric:
+            return "Capital discipline"
+        if "cash" in cat.lower() or "cash" in metric or "fcf" in metric:
+            return "Cash generation"
+        if "profit" in cat.lower() or "ebitda" in metric or "margin" in metric:
+            return "Profitability"
+        if "growth" in cat.lower() or "revenue" in metric or "sales" in metric:
+            return "Growth"
+        if "commercial" in cat.lower() or "pricing" in metric:
+            return "Commercial execution"
+        if "operations" in cat.lower() or "productivity" in metric or "cost" in metric:
+            return "Operational execution"
+        return "Other"
+
+    df["Recommended Action"] = df.apply(action, axis=1)
+    df["Evidence Sources"] = df.apply(evidence_bucket, axis=1)
+    df["Portfolio Role"] = df.apply(role, axis=1)
+
+    cols = [
+        "Metric", "Category", "Portfolio Role", "Current Plan Metric",
+        "Recommendation", "Recommended Action", "Readiness", "Confidence",
+        "Evidence Score", "Improvement vs Current Avg", "Evidence Sources",
+        "Why It Matters", "Directional Corr.", "Lagged Corr.", "Rolling 3Y Corr.",
+        "Payout Corr.", "Management Score", "Driver Evidence Score", "Design Fit",
+        "Data Status"
+    ]
+    cols = [c for c in cols if c in df.columns]
+    return df[cols].sort_values(["Current Plan Metric", "Evidence Score"], ascending=[True, False])
+
+
+def build_recommended_plan(candidate_objects, current_metrics, max_metrics=4):
+    if candidate_objects is None or candidate_objects.empty:
+        return pd.DataFrame()
+    rows = []
+    used_roles = set()
+    current = candidate_objects[candidate_objects["Current Plan Metric"] == True].copy()
+    candidates = candidate_objects[candidate_objects["Current Plan Metric"] == False].copy()
+
+    if not current.empty:
+        keep = current.sort_values("Evidence Score", ascending=False).head(1)
+        for _, r in keep.iterrows():
+            rows.append({
+                "Metric": r["Metric"],
+                "Role": r.get("Portfolio Role", ""),
+                "Reason": "Retains continuity with the current plan while preserving a metric with the strongest current-plan evidence.",
+                "Evidence Score": r["Evidence Score"],
+                "Confidence": r.get("Confidence", ""),
+                "Recommendation": "Retain"
+            })
+            used_roles.add(r.get("Portfolio Role", ""))
+
+    pool = candidates[candidates["Recommended Action"].isin(["Add / test in plan", "Consider in alternative"])].copy()
+    pool = pool.sort_values("Evidence Score", ascending=False)
+    for _, r in pool.iterrows():
+        if len(rows) >= max_metrics:
+            break
+        role = r.get("Portfolio Role", "")
+        if role in used_roles and len(rows) < max_metrics - 1:
+            continue
+        rows.append({
+            "Metric": r["Metric"],
+            "Role": role,
+            "Reason": r.get("Why It Matters", "Strong evidence profile."),
+            "Evidence Score": r["Evidence Score"],
+            "Confidence": r.get("Confidence", ""),
+            "Recommendation": r.get("Recommendation", "")
+        })
+        used_roles.add(role)
+
+    if len(rows) < min(max_metrics, len(candidate_objects)):
+        existing = {r["Metric"] for r in rows}
+        for _, r in pool.iterrows():
+            if len(rows) >= max_metrics:
+                break
+            if r["Metric"] in existing:
+                continue
+            rows.append({
+                "Metric": r["Metric"],
+                "Role": r.get("Portfolio Role", ""),
+                "Reason": r.get("Why It Matters", "Strong evidence profile."),
+                "Evidence Score": r["Evidence Score"],
+                "Confidence": r.get("Confidence", ""),
+                "Recommendation": r.get("Recommendation", "")
+            })
+            existing.add(r["Metric"])
+
+    plan = pd.DataFrame(rows)
+    if plan.empty:
+        return plan
+    n = len(plan)
+    if n == 1:
+        weights = [100]
+    elif n == 2:
+        weights = [50, 50]
+    elif n == 3:
+        weights = [40, 30, 30]
+    else:
+        weights = [35, 25, 20, 20][:n]
+        if sum(weights) != 100:
+            weights[0] += 100 - sum(weights)
+    plan["Suggested Weight"] = weights[:len(plan)]
+    plan["Weighted Evidence"] = plan["Evidence Score"] * plan["Suggested Weight"] / 100
+    return plan
+
+
+def build_executive_assessment(candidate_objects, recommended_plan):
+    if candidate_objects is None or candidate_objects.empty:
+        return {"current_score": np.nan, "best_candidate": "n/a", "strong_count": 0, "needs_data": 0, "recommended_plan_score": np.nan}
+    current = candidate_objects[candidate_objects["Current Plan Metric"] == True]
+    current_score = current["Evidence Score"].mean() if not current.empty else np.nan
+    best = candidate_objects[candidate_objects["Current Plan Metric"] == False].sort_values("Evidence Score", ascending=False)
+    best_candidate = best.iloc[0]["Metric"] if not best.empty else "n/a"
+    strong_count = int(candidate_objects["Recommendation"].isin(["Strong candidate", "Consider"]).sum())
+    needs_data = int((candidate_objects["Readiness"] == "Needs annual values").sum())
+    rec_score = recommended_plan["Weighted Evidence"].sum() if recommended_plan is not None and not recommended_plan.empty else np.nan
+    return {"current_score": current_score, "best_candidate": best_candidate, "strong_count": strong_count, "needs_data": needs_data, "recommended_plan_score": rec_score}
+
+
+def build_recommendation_narrative(company, candidate_objects, recommended_plan):
+    if candidate_objects is None or candidate_objects.empty:
+        return "No recommendation narrative is available yet."
+    assessment = build_executive_assessment(candidate_objects, recommended_plan)
+    current_score = assessment["current_score"]
+    rec_score = assessment["recommended_plan_score"]
+    best_candidate = assessment["best_candidate"]
+    top_drivers = ""
+    if "driver_summary_df" in st.session_state and not st.session_state.driver_summary_df.empty:
+        top_drivers = ", ".join(st.session_state.driver_summary_df.head(4)["Driver"].astype(str).tolist())
+    plan_metrics = ", ".join(recommended_plan["Metric"].astype(str).tolist()) if recommended_plan is not None and not recommended_plan.empty else "not yet available"
+    lines = [f"{company} Recommendation Workspace", ""]
+    if pd.notna(current_score):
+        lines.append(f"The current plan has an average evidence score of {current_score:.1f}/100.")
+    if pd.notna(rec_score):
+        delta = rec_score - current_score if pd.notna(current_score) else np.nan
+        if pd.notna(delta):
+            lines.append(f"The initial recommended design has an evidence score of {rec_score:.1f}/100, representing a {delta:+.1f} point change versus the current plan average.")
+        else:
+            lines.append(f"The initial recommended design has an evidence score of {rec_score:.1f}/100.")
+    lines.append(f"The strongest alternative candidate currently surfaced by the evidence model is {best_candidate}.")
+    if top_drivers:
+        lines.append(f"Management value-driver evidence highlights {top_drivers}, which should inform metric selection and the committee narrative.")
+    lines.append(f"The initial recommended plan includes: {plan_metrics}.")
+    lines.append("")
+    lines.append("Recommendations are directional and should be reviewed with consultant judgment, particularly where annual data is incomplete or where metrics may overlap.")
+    return "\\n".join(lines)
+
+
 def sample_perf():
     return pd.DataFrame({"Year":list(range(2016,2026)),"Adjusted EBITDA Actual":[714,716.8,931.2,1030.8,1070,1041,1600,1876,1693,1372],"Cash Flow Actual":[320,375.6,471.66,544.995,520,580,743,808,672,467]})
 def sample_payout():
