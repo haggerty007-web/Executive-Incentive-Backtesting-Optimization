@@ -600,6 +600,157 @@ def compare_current(score_df, current_metrics):
     alt["Improvement vs Current Avg"]=alt["Evidence Score"]-base if pd.notna(base) else np.nan
     return current, alt.sort_values("Evidence Score",ascending=False)
 
+
+# -----------------------------
+# Recommendation Workspace Engine
+# -----------------------------
+
+def build_recommendation_universe(score_df, current_metrics, driver_linkage_df=None):
+    if score_df is None or score_df.empty:
+        return pd.DataFrame()
+
+    df = score_df.copy()
+    current_set = {str(x) for x in current_metrics or []}
+    current_avg = df[df["Metric"].astype(str).isin(current_set)]["Evidence Score"].mean()
+    if pd.isna(current_avg):
+        current_avg = df["Evidence Score"].mean()
+
+    df["Current Plan Metric"] = df["Metric"].astype(str).isin(current_set)
+    df["Improvement vs Current Avg"] = df["Evidence Score"] - current_avg
+
+    def confidence(row):
+        sample_proxy = 0
+        for col in ["Current Corr.", "Lagged Corr.", "Rolling 3Y Corr.", "Payout Corr."]:
+            if col in row and pd.notna(row[col]):
+                sample_proxy += 2
+        extraction = row.get("Extraction Confidence", 0)
+        if sample_proxy >= 6 and extraction >= 70:
+            return "High"
+        if sample_proxy >= 4 or extraction >= 50:
+            return "Medium"
+        return "Low"
+
+    def recommendation(row):
+        if row["Current Plan Metric"]:
+            return "Current metric"
+        score = row["Evidence Score"]
+        improvement = row["Improvement vs Current Avg"]
+        driver = row.get("Driver Evidence Score", 0)
+        if score >= 80 and improvement >= 5:
+            return "Strong candidate"
+        if score >= 70 and (improvement >= 0 or driver >= 50):
+            return "Consider"
+        if driver >= 60 and score < 70:
+            return "Strategic driver; needs more data"
+        return "Lower priority"
+
+    def why(row):
+        reasons = []
+        if pd.notna(row.get("Directional Corr.", np.nan)) and abs(row.get("Directional Corr.", 0)) >= 0.60:
+            reasons.append("strong shareholder-value relationship")
+        if pd.notna(row.get("Lagged Corr.", np.nan)) and abs(row.get("Lagged Corr.", 0)) >= 0.50:
+            reasons.append("meaningful lagged relationship")
+        if row.get("Management Score", 0) >= 70:
+            reasons.append("management emphasis")
+        if row.get("Driver Evidence Score", 0) >= 50:
+            reasons.append("linked to recurring management value drivers")
+        if row.get("Stability", 0) >= 70:
+            reasons.append("relatively stable history")
+        if row.get("Design Fit", 0) >= 85:
+            reasons.append("strong incentive design fit")
+        return "; ".join(reasons) if reasons else "included for consultant review"
+
+    df["Confidence"] = df.apply(confidence, axis=1)
+    df["Recommendation"] = df.apply(recommendation, axis=1)
+    df["Why It Matters"] = df.apply(why, axis=1)
+    df["Data Status"] = np.where(
+        df[[c for c in ["Current Corr.", "Lagged Corr.", "Rolling 3Y Corr."] if c in df.columns]].notna().any(axis=1),
+        "Quantitatively tested",
+        "Strategic evidence only"
+    )
+
+    cols = [
+        "Metric", "Category", "Source Type", "Current Plan Metric", "Recommendation",
+        "Evidence Score", "Confidence", "Improvement vs Current Avg",
+        "Directional Corr.", "Lagged Corr.", "Rolling 3Y Corr.", "Payout Corr.",
+        "Management Score", "Driver Evidence Score", "Design Fit", "Data Status",
+        "Why It Matters"
+    ]
+    cols = [c for c in cols if c in df.columns]
+    return df[cols].sort_values(["Current Plan Metric", "Evidence Score"], ascending=[True, False])
+
+
+def current_plan_summary(reco_df):
+    if reco_df is None or reco_df.empty:
+        return pd.DataFrame()
+    return reco_df[reco_df["Current Plan Metric"] == True].sort_values("Evidence Score", ascending=False)
+
+
+def candidate_summary(reco_df):
+    if reco_df is None or reco_df.empty:
+        return pd.DataFrame()
+    cand = reco_df[reco_df["Current Plan Metric"] == False].copy()
+    priority_order = {"Strong candidate": 0, "Consider": 1, "Strategic driver; needs more data": 2, "Lower priority": 3}
+    cand["_priority"] = cand["Recommendation"].map(priority_order).fillna(9)
+    return cand.sort_values(["_priority", "Evidence Score"], ascending=[True, False]).drop(columns=["_priority"])
+
+
+def build_plan_score(reco_df, selected_metrics, weights):
+    if reco_df is None or reco_df.empty or not selected_metrics:
+        return pd.DataFrame(), np.nan
+    rows, total_score, total_weight = [], 0, 0
+    for m in selected_metrics:
+        w = weights.get(m, 0)
+        row = reco_df[reco_df["Metric"] == m]
+        if row.empty:
+            continue
+        ev = float(row["Evidence Score"].iloc[0])
+        total_score += ev * w / 100
+        total_weight += w
+        rows.append({
+            "Metric": m,
+            "Weight": w,
+            "Evidence Score": ev,
+            "Weighted Evidence": ev * w / 100,
+            "Confidence": row["Confidence"].iloc[0] if "Confidence" in row.columns else "",
+            "Recommendation": row["Recommendation"].iloc[0] if "Recommendation" in row.columns else "",
+        })
+    return pd.DataFrame(rows), total_score if total_weight == 100 else np.nan
+
+
+def build_why_not_table(reco_df):
+    if reco_df is None or reco_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in reco_df.iterrows():
+        if r.get("Current Plan Metric", False):
+            continue
+        rec = r.get("Recommendation", "")
+        conf = r.get("Confidence", "")
+        data_status = r.get("Data Status", "")
+        if rec in ["Strong candidate", "Consider"]:
+            reason = "Candidate appears supportable based on the current evidence profile."
+            action = "Evaluate in alternative design."
+        elif rec == "Strategic driver; needs more data":
+            reason = "Strategically important but annual quantitative history is incomplete or weaker."
+            action = "Collect annual values before using as a formal incentive metric."
+        elif conf == "Low":
+            reason = "Evidence confidence is low."
+            action = "Validate data quality and sample size."
+        elif data_status != "Quantitatively tested":
+            reason = "Metric has strategic evidence but has not been fully tested quantitatively."
+            action = "Add annual history in Annual Values."
+        else:
+            reason = "Lower evidence score relative to the current candidate universe."
+            action = "Keep as background evidence unless strategy requires it."
+        rows.append({
+            "Metric": r["Metric"],
+            "Recommendation": rec,
+            "Why Not / Risk": reason,
+            "Next Action": action,
+        })
+    return pd.DataFrame(rows)
+
 def sample_perf():
     return pd.DataFrame({"Year":list(range(2016,2026)),"Adjusted EBITDA Actual":[714,716.8,931.2,1030.8,1070,1041,1600,1876,1693,1372],"Cash Flow Actual":[320,375.6,471.66,544.995,520,580,743,808,672,467]})
 def sample_payout():
@@ -842,22 +993,71 @@ elif page=="6. Evidence Engine":
     st.plotly_chart(px.bar(score.sort_values("Directional Corr.").tail(12),x="Directional Corr.",y="Metric",orientation="h",title="Directional relationship to shareholder value"),use_container_width=True)
 
 elif page=="7. Design Lab":
-    st.header("7. Design Lab")
-    score=st.session_state.score_df
-    if score.empty: st.warning("Run Evidence Engine first."); st.stop()
-    metrics=score["Metric"].tolist()
-    selected=st.multiselect("Metrics in proposed design",metrics,default=metrics[:min(3,len(metrics))],max_selections=5)
-    if not selected: st.stop()
-    weights={}; cols=st.columns(len(selected))
-    for i,m in enumerate(selected): weights[m]=cols[i].slider(f"Weight: {m}",0,100,int(100/len(selected)),5)
-    total=sum(weights.values())
-    if total!=100: st.warning(f"Weights sum to {total}%. Adjust to 100%."); st.stop()
-    rows=[]; design_score=0
-    for m,w in weights.items():
-        ev=float(score.loc[score["Metric"]==m,"Evidence Score"].iloc[0]); design_score += ev*w/100
-        rows.append({"Metric":m,"Weight":w,"Evidence Score":ev,"Weighted Evidence":ev*w/100})
-    df=pd.DataFrame(rows); st.metric("Design evidence score",f"{design_score:.1f}/100"); st.dataframe(df,use_container_width=True)
-    st.plotly_chart(px.bar(df,x="Metric",y="Weight",title="Proposed weights"),use_container_width=True)
+    st.header("7. Recommendation Workspace")
+    st.info("Start with the evidence, compare the current plan to stronger alternatives, then build a proposed design.")
+
+    score = st.session_state.score_df
+    if score.empty:
+        st.warning("Run Evidence Engine first.")
+        st.stop()
+
+    reco = build_recommendation_universe(score, st.session_state.current_metrics, st.session_state.driver_linkage_df)
+    current_plan = current_plan_summary(reco)
+    candidates = candidate_summary(reco)
+
+    st.subheader("Current Plan Evidence")
+    if current_plan.empty:
+        st.warning("No current plan metrics were selected in the Evidence Engine.")
+    else:
+        st.dataframe(current_plan, use_container_width=True)
+        current_avg = current_plan["Evidence Score"].mean()
+        st.metric("Current Plan Average Evidence Score", f"{current_avg:.1f}/100")
+
+    st.subheader("Recommended Candidate Universe")
+    st.caption("Recommendations are derived from correlations, management emphasis, value-driver evidence, stability, and design fit.")
+    st.dataframe(candidates, use_container_width=True)
+    download_df(reco, "Download recommendation universe", "recommendation_universe.csv")
+
+    strong = candidates[candidates["Recommendation"].isin(["Strong candidate", "Consider"])]
+    if not strong.empty:
+        st.success("Suggested metrics to evaluate: " + ", ".join(strong.head(6)["Metric"].tolist()))
+
+    st.subheader("Build Alternative Design")
+    default_metrics = []
+    if not current_plan.empty:
+        default_metrics += current_plan["Metric"].head(1).tolist()
+    if not strong.empty:
+        default_metrics += strong["Metric"].head(2).tolist()
+    default_metrics = list(dict.fromkeys(default_metrics))[:4]
+
+    available = reco["Metric"].tolist()
+    selected = st.multiselect("Select metrics for proposed design", available, default=default_metrics, max_selections=6)
+
+    if selected:
+        weights = {}
+        cols = st.columns(len(selected))
+        default_weight = int(100 / len(selected))
+        for i, m in enumerate(selected):
+            weights[m] = cols[i].slider(f"Weight: {m}", 0, 100, default_weight, 5)
+
+        total = sum(weights.values())
+        if total != 100:
+            st.warning(f"Weights sum to {total}%. Adjust to 100%.")
+        else:
+            design_df, design_score = build_plan_score(reco, selected, weights)
+            st.metric("Proposed Design Evidence Score", f"{design_score:.1f}/100")
+            if not current_plan.empty:
+                current_avg = current_plan["Evidence Score"].mean()
+                st.metric("Improvement vs Current Plan Avg", f"{design_score - current_avg:+.1f}")
+            st.dataframe(design_df, use_container_width=True)
+            st.plotly_chart(px.bar(design_df, x="Metric", y="Weight", title="Proposed design weights"), use_container_width=True)
+
+    st.subheader("Why Not? / Readiness Review")
+    why_not = build_why_not_table(reco)
+    if not why_not.empty:
+        st.dataframe(why_not, use_container_width=True)
+        download_df(why_not, "Download readiness review", "metric_readiness_review.csv")
+
 
 elif page=="8. Committee Summary":
     st.header("8. Committee Summary")
