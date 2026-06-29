@@ -1400,8 +1400,14 @@ elif page=="6. Evidence Engine":
     # not the first two ready metrics after Capital IQ / bridge metrics are added.
     default_current = infer_current_plan_defaults(st.session_state.perf_df, perf_year, ready_metrics)
 
-    if "current_metrics_selector" not in st.session_state:
+    # Streamlit keeps widget state across reruns. If this selector was previously empty
+    # or contains metrics that are no longer available, reset it to the detected current-plan defaults.
+    existing_current = st.session_state.get("current_metrics_selector", [])
+    existing_current = [m for m in existing_current if m in ready_metrics]
+    if not existing_current:
         st.session_state.current_metrics_selector = default_current
+    else:
+        st.session_state.current_metrics_selector = existing_current
 
     if st.button("Reset current metrics to uploaded incentive metrics", key="reset_current_metrics"):
         st.session_state.current_metrics_selector = default_current
@@ -1415,19 +1421,50 @@ elif page=="6. Evidence Engine":
             help="These should be the metrics in the current incentive plan, not automatically suggested alternatives."
         )
         st.caption("Default current-plan metrics: " + (", ".join(default_current) if default_current else "none found"))
+
+    # Metrics to test should be sticky. Do not keep re-adding the top ready metrics
+    # after the user has intentionally removed them.
+    if "metrics_to_test_initialized" not in st.session_state:
+        initial_metrics = list(dict.fromkeys(current_metrics + ready_metrics[:min(15,len(ready_metrics))]))
+        st.session_state.metrics_to_test_selector = initial_metrics[:min(30, len(initial_metrics))]
+        st.session_state.metrics_to_test_initialized = True
+    else:
+        existing_test_metrics = st.session_state.get("metrics_to_test_selector", [])
+        st.session_state.metrics_to_test_selector = [m for m in existing_test_metrics if m in ready_metrics]
+
+    reset_cols = st.columns([1, 1])
+    with reset_cols[0]:
+        if st.button("Reset metrics to test to top ready metrics", key="reset_metrics_to_test"):
+            initial_metrics = list(dict.fromkeys(current_metrics + ready_metrics[:min(15,len(ready_metrics))]))
+            st.session_state.metrics_to_test_selector = initial_metrics[:min(30, len(initial_metrics))]
+    with reset_cols[1]:
+        if st.button("Clear alternative metrics", key="clear_metrics_to_test"):
+            st.session_state.metrics_to_test_selector = list(dict.fromkeys(current_metrics))
+
     with c2:
-        selected=st.multiselect(
+        selected_user=st.multiselect(
             "Metrics to test",
             ready_metrics,
-            default=ready_metrics[:min(15,len(ready_metrics))],
             max_selections=30,
             key="metrics_to_test_selector"
         )
+
+    # Hard guarantee for scoring only: current metrics are included in the scorecard,
+    # but we do not mutate the user's Metrics to Test selector. This prevents removed
+    # alternatives from reappearing when moving between pages.
+    selected = list(dict.fromkeys(current_metrics + selected_user))
+
     payout_col=st.selectbox("Payout column",payout_cols); value_col=st.selectbox("Shareholder value outcome",value_cols)
+    st.caption("Metrics to Test is sticky. Removed alternatives will stay removed unless you use a reset button. Current metrics are always scored for comparison.")
     score=score_metrics(master,objs,selected,value_col,payout_col,st.session_state.mgmt_df)
     st.session_state.score_df=score; st.session_state.current_metrics=current_metrics
     if score.empty: st.error("No correlations available. Check annual values and metric object columns."); st.stop()
     current,alt=compare_current(score,current_metrics)
+    if current.empty and current_metrics:
+        st.warning(
+            "Current metrics are selected but did not appear in the scored results. "
+            "Check that those current metric columns contain numeric annual values and are marked Ready on Tab 5."
+        )
     st.subheader("Metric Evidence Scorecard"); st.dataframe(score,use_container_width=True); download_df(score,"Download scorecard","metric_evidence_scorecard.csv")
     if not st.session_state.driver_summary_df.empty:
         st.subheader("Management Value Driver Evidence")
