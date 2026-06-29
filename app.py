@@ -615,6 +615,9 @@ st.sidebar.title("Design Lab V3")
 company=st.sidebar.text_input("Company",value="Graphic Packaging")
 page=st.sidebar.radio("Workflow",["1. Import Data","2. Management Metrics","2A. Management Value Drivers","3. Metric Catalog & Capital IQ","4. Annual Values","5. Build Metric Objects","6. Evidence Engine","7. Design Lab","8. Committee Summary"])
 
+if "driver_df" in st.session_state and not st.session_state.driver_df.empty:
+    st.sidebar.success(f"Driver data saved: {len(st.session_state.driver_df)} rows")
+
 st.title("Executive Incentive Design Lab V3")
 st.caption("Metric Object Engine | Transformation Rules | Current vs Alternative Incentive Metrics")
 
@@ -698,22 +701,35 @@ This module captures a different evidence layer than Capital IQ. Capital IQ prov
             st.warning("Could not recognize the pasted table. Use either long format Year / Driver / Impact, or wide format Year / Price / Volume-Mix / Inflation / FX / Other.")
 
     if driver_df.empty:
-        st.warning("No structured driver data found yet. Use the manual paste format or upload reports with bridge/variance tables.")
-    else:
+        if not st.session_state.driver_df.empty:
+            st.info("Using saved management driver history from this session.")
+            driver_df = st.session_state.driver_df.copy()
+        else:
+            st.warning("No structured driver data found yet. Use the manual paste format or upload reports with bridge/variance tables.")
+
+    if not driver_df.empty:
         driver_df["Driver"] = driver_df["Driver"].map(canonical_driver)
         driver_df = st.data_editor(driver_df, use_container_width=True, num_rows="dynamic", key="driver_editor")
-        st.session_state.driver_df = driver_df
+
+        summary = summarize_value_drivers(driver_df)
+        linkages = driver_to_metric_linkages(summary)
+
+        st.session_state.driver_df = driver_df.copy()
+        st.session_state.driver_summary_df = summary.copy()
+        st.session_state.driver_linkage_df = linkages.copy()
+
+        st.success(
+            f"Saved {len(driver_df)} driver-year observations, "
+            f"{len(summary)} driver summaries, and {len(linkages)} driver-to-metric linkages for this session."
+        )
+
         download_df(driver_df, "Download management driver history", "management_value_driver_history.csv")
 
         st.subheader("Driver Summary")
-        summary = summarize_value_drivers(driver_df)
-        st.session_state.driver_summary_df = summary
         st.dataframe(summary, use_container_width=True)
         download_df(summary, "Download driver summary", "management_driver_summary.csv")
 
         st.subheader("Driver-to-Metric Linkages")
-        linkages = driver_to_metric_linkages(summary)
-        st.session_state.driver_linkage_df = linkages
         st.dataframe(linkages, use_container_width=True)
         download_df(linkages, "Download driver-to-metric linkages", "driver_metric_linkages.csv")
 
@@ -727,6 +743,12 @@ This module captures a different evidence layer than Capital IQ. Capital IQ prov
 
 elif page=="3. Metric Catalog & Capital IQ":
     st.header("3. Metric Catalog & Capital IQ")
+    if not st.session_state.driver_summary_df.empty:
+        st.success("Management value driver evidence is available and will be included in the metric mapping/evidence engine.")
+        with st.expander("Saved management value drivers"):
+            st.dataframe(st.session_state.driver_summary_df, use_container_width=True)
+            if not st.session_state.driver_linkage_df.empty:
+                st.dataframe(st.session_state.driver_linkage_df, use_container_width=True)
     mgmt=st.session_state.mgmt_df
     metrics=mgmt["Metric"].dropna().astype(str).tolist() if not mgmt.empty and "Metric" in mgmt.columns else []
     if not st.session_state.driver_linkage_df.empty:
@@ -776,6 +798,8 @@ def build_context():
 
 if page=="5. Build Metric Objects":
     st.header("5. Build Metric Objects")
+    if not st.session_state.driver_summary_df.empty:
+        st.info("Management value driver evidence is loaded and will be used in Evidence Engine scoring.")
     perf2,payout,value,master,perf_year,payout_year,value_year=build_context()
     with st.expander("Merged performance dataset"): st.dataframe(perf2,use_container_width=True)
     objs=build_metric_objects(perf2,st.session_state.mapping_df)
