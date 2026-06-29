@@ -1132,6 +1132,33 @@ def build_recommendation_narrative(company, candidate_objects, recommended_plan)
     return "\\n".join(lines)
 
 
+
+def infer_current_plan_defaults(perf_df, perf_year, ready_metrics):
+    """
+    Current incentive metrics should come from the original uploaded performance/current-plan file,
+    not from Capital IQ or bridge-driver columns that are added later.
+    """
+    if perf_df is None or perf_df.empty:
+        return ready_metrics[:min(2, len(ready_metrics))]
+
+    original_cols = [c for c in perf_df.columns if c != perf_year and c in ready_metrics]
+
+    def is_current_plan_like(c):
+        name = str(c).lower()
+        if name.startswith("iq_"):
+            return False
+        if name in ["pricing", "volume/mix", "inflation", "foreign exchange", "fx", "other"]:
+            return False
+        return (
+            "actual" in name
+            or "payout" not in name and any(term in name for term in ["ebitda", "cash flow", "eps", "revenue", "sales", "roic"])
+        )
+
+    preferred = [c for c in original_cols if is_current_plan_like(c)]
+    fallback = [c for c in original_cols if not str(c).lower().startswith("iq_")]
+    defaults = preferred or fallback or ready_metrics[:min(2, len(ready_metrics))]
+    return defaults[:min(2, len(defaults))]
+
 def sample_perf():
     return pd.DataFrame({"Year":list(range(2016,2026)),"Adjusted EBITDA Actual":[714,716.8,931.2,1030.8,1070,1041,1600,1876,1693,1372],"Cash Flow Actual":[320,375.6,471.66,544.995,520,580,743,808,672,467]})
 def sample_payout():
@@ -1351,6 +1378,10 @@ if page=="5. Build Metric Objects":
     if bridge_cols:
         st.success("Bridge / operating metrics available for analysis: " + ", ".join(bridge_cols))
     objs=build_metric_objects(perf2,st.session_state.mapping_df)
+    ready_preview=objs[objs["Ready"]==True]["Metric"].tolist() if "Ready" in objs.columns and not objs.empty else []
+    default_current_preview=infer_current_plan_defaults(st.session_state.perf_df, perf_year, ready_preview)
+    if default_current_preview:
+        st.info("Default current incentive metrics detected from uploaded performance data: " + ", ".join(default_current_preview))
     objs=st.data_editor(objs,use_container_width=True,num_rows="dynamic",key="metric_objects_editor")
     st.session_state.metric_objects=objs; st.session_state.master_df=master
     st.subheader("Metric Objects"); st.dataframe(objs,use_container_width=True); download_df(objs,"Download metric objects","metric_objects.csv")
@@ -1363,9 +1394,35 @@ elif page=="6. Evidence Engine":
     if objs.empty: objs=build_metric_objects(perf2,st.session_state.mapping_df); st.session_state.metric_objects=objs
     payout_cols=[c for c in payout.columns if c!=payout_year]; value_cols=[c for c in value.columns if c!=value_year]
     ready_metrics=objs[objs["Ready"]==True]["Metric"].tolist() if "Ready" in objs.columns else objs["Metric"].tolist()
+
+    # Stable current-plan selector.
+    # The current plan should default to metrics from the original uploaded performance file,
+    # not the first two ready metrics after Capital IQ / bridge metrics are added.
+    default_current = infer_current_plan_defaults(st.session_state.perf_df, perf_year, ready_metrics)
+
+    if "current_metrics_selector" not in st.session_state:
+        st.session_state.current_metrics_selector = default_current
+
+    if st.button("Reset current metrics to uploaded incentive metrics", key="reset_current_metrics"):
+        st.session_state.current_metrics_selector = default_current
+
     c1,c2=st.columns(2)
-    with c1: current_metrics=st.multiselect("Current incentive metrics",ready_metrics,default=ready_metrics[:min(2,len(ready_metrics))])
-    with c2: selected=st.multiselect("Metrics to test",ready_metrics,default=ready_metrics[:min(15,len(ready_metrics))],max_selections=30)
+    with c1:
+        current_metrics=st.multiselect(
+            "Current incentive metrics",
+            ready_metrics,
+            key="current_metrics_selector",
+            help="These should be the metrics in the current incentive plan, not automatically suggested alternatives."
+        )
+        st.caption("Default current-plan metrics: " + (", ".join(default_current) if default_current else "none found"))
+    with c2:
+        selected=st.multiselect(
+            "Metrics to test",
+            ready_metrics,
+            default=ready_metrics[:min(15,len(ready_metrics))],
+            max_selections=30,
+            key="metrics_to_test_selector"
+        )
     payout_col=st.selectbox("Payout column",payout_cols); value_col=st.selectbox("Shareholder value outcome",value_cols)
     score=score_metrics(master,objs,selected,value_col,payout_col,st.session_state.mgmt_df)
     st.session_state.score_df=score; st.session_state.current_metrics=current_metrics
