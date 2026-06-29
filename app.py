@@ -340,6 +340,78 @@ def extract_management_value_drivers(files):
     out = out.drop_duplicates(subset=["Year", "Driver", "Impact"], keep="first")
     return out.sort_values(["Year", "Driver"])
 
+
+def normalize_manual_driver_table(manual_df):
+    """
+    Accept either:
+    1. Long format: Year, Driver, Impact
+    2. Wide bridge format: Year, Price, Volume/Mix, Inflation, FX, Other, etc.
+    Returns long format.
+    """
+    if manual_df is None or manual_df.empty:
+        return pd.DataFrame()
+
+    df = manual_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    cols_lower = {c.lower(): c for c in df.columns}
+    if {"year", "driver", "impact"}.issubset(set(cols_lower.keys())):
+        out = df[[cols_lower["year"], cols_lower["driver"], cols_lower["impact"]]].copy()
+        out.columns = ["Year", "Driver", "Impact"]
+        out["Driver"] = out["Driver"].map(canonical_driver)
+        out["Impact"] = out["Impact"].map(clean_num)
+        out["Original Label"] = out["Driver"]
+        out["Source Page"] = ""
+        out["Source Type"] = "Manual paste"
+        out["Confidence"] = "Manual review"
+        return out.dropna(subset=["Year", "Driver", "Impact"])
+
+    year_col = infer_year_col(df)
+    if year_col is None:
+        return pd.DataFrame()
+
+    non_driver_terms = [
+        "starting", "ending", "beginning", "income from operations",
+        "net change", "increase", "decrease", "percent", "change",
+        "year", "total", "consolidated"
+    ]
+
+    driver_candidates = []
+    for c in df.columns:
+        if c == year_col:
+            continue
+        c_norm = norm_text(c)
+        if any(t in c_norm for t in non_driver_terms):
+            continue
+        canon = canonical_driver(c)
+        numeric_count = df[c].map(clean_num).notna().sum()
+        if numeric_count >= 1 and (canon != "Other" or c_norm == "other"):
+            driver_candidates.append((c, canon))
+
+    if not driver_candidates:
+        return pd.DataFrame()
+
+    rows = []
+    for _, r in df.iterrows():
+        year = standardize_year(pd.Series([r[year_col]])).iloc[0]
+        if pd.isna(year):
+            continue
+        for col, canon in driver_candidates:
+            impact = clean_num(r[col])
+            if pd.isna(impact):
+                continue
+            rows.append({
+                "Year": int(year),
+                "Driver": canon,
+                "Original Label": col,
+                "Impact": impact,
+                "Source Page": "",
+                "Source Type": "Manual wide bridge paste",
+                "Confidence": "Manual review"
+            })
+
+    return pd.DataFrame(rows)
+
 def summarize_value_drivers(driver_df):
     if driver_df is None or driver_df.empty:
         return pd.DataFrame()
@@ -608,7 +680,7 @@ This module captures a different evidence layer than Capital IQ. Capital IQ prov
     manual = st.text_area(
         "Optional: paste management driver history manually",
         height=160,
-        placeholder="Year\tDriver\tImpact\n2022\tPricing\t1131\n2022\tVolume/Mix\t173\n2022\tInflation\t-710"
+        placeholder="Wide format example:\nYear\tPrice\tVolume/Mix\tInflation\tFX\tOther\n2023\t556\t-204\t-175\t-11\t102\n\nOr long format:\nYear\tDriver\tImpact\n2023\tPrice\t556"
     )
 
     driver_df = pd.DataFrame()
@@ -618,10 +690,12 @@ This module captures a different evidence layer than Capital IQ. Capital IQ prov
 
     manual_df = parse_table(manual)
     if not manual_df.empty:
-        if {"Year", "Driver", "Impact"}.issubset(set(manual_df.columns)):
-            driver_df = pd.concat([driver_df, manual_df], ignore_index=True)
+        normalized_manual = normalize_manual_driver_table(manual_df)
+        if not normalized_manual.empty:
+            driver_df = pd.concat([driver_df, normalized_manual], ignore_index=True)
+            st.success(f"Recognized {len(normalized_manual)} driver-year observations from the pasted table.")
         else:
-            st.warning("Manual driver table should include Year, Driver, and Impact columns.")
+            st.warning("Could not recognize the pasted table. Use either long format Year / Driver / Impact, or wide format Year / Price / Volume-Mix / Inflation / FX / Other.")
 
     if driver_df.empty:
         st.warning("No structured driver data found yet. Use the manual paste format or upload reports with bridge/variance tables.")
