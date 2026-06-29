@@ -35,6 +35,10 @@ METRIC_CATALOG = [
     {"Canonical Metric":"Cost Savings","Aliases":["cost savings","cost reduction"],"Category":"Operations","Capital IQ Field":"","Source Type":"Company / Investor Materials","Default Transformation":"Level","Direction":"Higher is better","Outcome Basis":"YoY % Change","Incentive Use":"Strategic / operating metric","Notes":"Company-specific operating KPI."},
     {"Canonical Metric":"Productivity Savings","Aliases":["productivity","productivity savings"],"Category":"Operations","Capital IQ Field":"","Source Type":"Company / Investor Materials","Default Transformation":"Level","Direction":"Higher is better","Outcome Basis":"YoY % Change","Incentive Use":"Strategic / operating metric","Notes":"Company-specific operating KPI."},
     {"Canonical Metric":"Safety","Aliases":["safety","trir","recordable incident rate"],"Category":"Human Capital","Capital IQ Field":"","Source Type":"Company / ESG / Internal","Default Transformation":"Level","Direction":"Lower is better","Outcome Basis":"YoY % Change","Incentive Use":"Modifier / ESG metric","Notes":"Usually internal or sustainability report data."},
+    {"Canonical Metric":"Operating Income","Aliases":["operating income","income from operations","income from operation","operating profit"],"Category":"Profitability","Capital IQ Field":"IQ_EBIT","Source Type":"Capital IQ","Default Transformation":"YoY % Change","Direction":"Higher is better","Outcome Basis":"YoY % Change","Incentive Use":"Annual incentive","Notes":"Closest Capital IQ proxy is EBIT / operating income. Useful when 10-K bridge tables explain Income from Operations."},
+    {"Canonical Metric":"Volume/Mix","Aliases":["volume/mix","volume mix","volume","mix","sales volume"],"Category":"Commercial","Capital IQ Field":"","Source Type":"10-K Bridge / Investor Materials","Default Transformation":"Level","Direction":"Higher is better","Outcome Basis":"YoY % Change","Incentive Use":"Operating driver","Notes":"Management bridge driver. Can be analyzed when annual bridge impacts are pasted."},
+    {"Canonical Metric":"Inflation","Aliases":["inflation","commodity inflation","input costs","raw materials","material costs","freight","energy","labor inflation"],"Category":"Operations","Capital IQ Field":"","Source Type":"10-K Bridge / Investor Materials","Default Transformation":"Level","Direction":"Lower is better","Outcome Basis":"YoY % Change","Incentive Use":"Operating driver / context","Notes":"Management bridge driver. Usually a headwind rather than a direct incentive metric."},
+    {"Canonical Metric":"Foreign Exchange","Aliases":["foreign exchange","fx","currency"],"Category":"Commercial","Capital IQ Field":"","Source Type":"10-K Bridge / Investor Materials","Default Transformation":"Level","Direction":"Higher is better","Outcome Basis":"YoY % Change","Incentive Use":"Operating driver / context","Notes":"Management bridge driver. Usually context rather than a core incentive metric."},
     {"Canonical Metric":"Market Cap","Aliases":["market cap","market capitalization"],"Category":"Shareholder Value","Capital IQ Field":"IQ_MARKETCAP","Source Type":"Capital IQ","Default Transformation":"YoY % Change","Direction":"Higher is better","Outcome Basis":"YoY % Change","Incentive Use":"Outcome","Notes":"Shareholder value outcome."},
     {"Canonical Metric":"Stock Price","Aliases":["stock price","share price","closing price"],"Category":"Shareholder Value","Capital IQ Field":"IQ_CLOSEPRICE_ADJ","Source Type":"Capital IQ","Default Transformation":"YoY % Change","Direction":"Higher is better","Outcome Basis":"YoY % Change","Incentive Use":"Outcome","Notes":"Adjusted close price. Proxy for TSR if dividends unavailable."},
 ]
@@ -443,11 +447,11 @@ def driver_to_metric_linkages(driver_summary):
     if driver_summary is None or driver_summary.empty:
         return pd.DataFrame()
     mapping = {
-        "Pricing": ["Revenue", "EBITDA", "EBITDA Margin"],
-        "Volume/Mix": ["Revenue", "EBITDA"],
-        "Inflation": ["EBITDA Margin", "Free Cash Flow", "Cost Savings"],
-        "Foreign Exchange": ["Revenue", "EBITDA"],
-        "Productivity": ["EBITDA", "Free Cash Flow", "Cost Savings", "Productivity Savings"],
+        "Pricing": ["Revenue", "Operating Income", "EBITDA", "EBITDA Margin", "Pricing"],
+        "Volume/Mix": ["Revenue", "Operating Income", "EBITDA", "Volume/Mix"],
+        "Inflation": ["Operating Income", "EBITDA Margin", "Free Cash Flow", "Cost Savings", "Inflation"],
+        "Foreign Exchange": ["Revenue", "Operating Income", "EBITDA", "Foreign Exchange"],
+        "Productivity": ["Operating Income", "EBITDA", "Free Cash Flow", "Cost Savings", "Productivity Savings"],
         "Synergies": ["EBITDA", "Free Cash Flow"],
         "Acquisition / Divestiture": ["Revenue", "EBITDA", "ROIC"],
         "Other": ["Adjusted EBITDA"],
@@ -526,6 +530,29 @@ def add_bridge_columns(perf_df, mapping_df):
                 out[display]=np.where(d!=0, n/d, np.nan)
     return out
 
+
+def driver_history_to_wide(driver_df):
+    """
+    Convert long-form management bridge driver history into annual columns.
+    Example output columns: Pricing, Volume/Mix, Inflation, Foreign Exchange.
+    These become metric objects and can be tested like other annual metrics.
+    """
+    if driver_df is None or driver_df.empty:
+        return pd.DataFrame()
+    required = {"Year", "Driver", "Impact"}
+    if not required.issubset(set(driver_df.columns)):
+        return pd.DataFrame()
+    df = driver_df.copy()
+    df["Year"] = standardize_year(df["Year"])
+    df["Impact"] = pd.to_numeric(df["Impact"].map(clean_num), errors="coerce")
+    df = df.dropna(subset=["Year", "Driver", "Impact"])
+    if df.empty:
+        return pd.DataFrame()
+    df["Year"] = df["Year"].astype(int)
+    wide = df.pivot_table(index="Year", columns="Driver", values="Impact", aggfunc="sum").reset_index()
+    wide.columns = [str(c) for c in wide.columns]
+    return wide
+
 def merge_candidate_values(perf_df, perf_year, candidate_df):
     if candidate_df is None or candidate_df.empty: return perf_df.copy()
     y2=infer_year_col(candidate_df)
@@ -589,6 +616,14 @@ def score_metrics(master, metric_objects, selected_metrics, value_col, payout_co
             match=dl[dl["Linked Financial / Incentive Metric"].astype(str).str.lower()==str(metric).lower()]
             if not match.empty:
                 driver_score=float(pd.to_numeric(match["Driver Evidence Score"],errors="coerce").fillna(0).max())
+
+        # Direct bridge-driver metrics such as Pricing, Volume/Mix, Inflation, and FX
+        # should also receive their own driver evidence score.
+        if "driver_summary_df" in st.session_state and not st.session_state.driver_summary_df.empty:
+            ds=st.session_state.driver_summary_df
+            dmatch=ds[ds["Driver"].astype(str).str.lower()==str(metric).lower()]
+            if not dmatch.empty:
+                driver_score=max(driver_score, float(pd.to_numeric(dmatch["Driver Evidence Score"],errors="coerce").fillna(0).max()))
         evidence=0.27*value_score+0.12*lag_score+0.10*roll_score+0.09*payout_score+0.09*st_score+0.09*design_fit+0.09*mgmt_score+0.05*confidence+0.10*driver_score
         rows.append({"Metric":metric,"Column":col,"Category":obj["Category"],"Source Type":obj["Source Type"],"Transformation":obj["Transformation"],"Direction":obj["Direction"],"Current Corr.":corr_now,"Directional Corr.":directional,"Lagged Corr.":corr_lag,"Rolling 3Y Corr.":corr_roll,"Payout Corr.":corr_payout,"Stability":st_score,"Management Score":mgmt_score,"Driver Evidence Score":driver_score,"Design Fit":design_fit,"Evidence Score":evidence,"Mention Count":mentions,"Extraction Confidence":confidence})
     return pd.DataFrame(rows).sort_values("Evidence Score",ascending=False) if rows else pd.DataFrame()
@@ -1250,6 +1285,9 @@ elif page=="3. Metric Catalog & Capital IQ":
     metrics=mgmt["Metric"].dropna().astype(str).tolist() if not mgmt.empty and "Metric" in mgmt.columns else []
     if not st.session_state.driver_linkage_df.empty:
         metrics += st.session_state.driver_linkage_df["Linked Financial / Incentive Metric"].dropna().astype(str).tolist()
+    if "driver_summary_df" in st.session_state and not st.session_state.driver_summary_df.empty:
+        metrics += st.session_state.driver_summary_df["Driver"].dropna().astype(str).tolist()
+        metrics += ["Operating Income"]
     add=st.text_area("Add metrics to map, one per line",height=120)
     metrics += [x.strip() for x in add.splitlines() if x.strip()]
     metrics=list(dict.fromkeys(metrics))
@@ -1288,8 +1326,17 @@ def build_context():
     with c2: payout_year=st.selectbox("Payout year column",payout.columns,index=list(payout.columns).index(payy) if payy in payout.columns else 0)
     with c3: value_year=st.selectbox("Shareholder value year column",value.columns,index=list(value.columns).index(vy) if vy in value.columns else 0)
     perf2=perf.copy()
-    if not st.session_state.candidate_df.empty: perf2=merge_candidate_values(perf2,perf_year,st.session_state.candidate_df)
-    if not st.session_state.mapping_df.empty: perf2=add_bridge_columns(perf2,st.session_state.mapping_df)
+    if not st.session_state.candidate_df.empty:
+        perf2=merge_candidate_values(perf2,perf_year,st.session_state.candidate_df)
+
+    # Add 10-K bridge drivers as analyzable annual metric columns.
+    if "driver_df" in st.session_state and not st.session_state.driver_df.empty:
+        driver_wide = driver_history_to_wide(st.session_state.driver_df)
+        if not driver_wide.empty:
+            perf2 = merge_candidate_values(perf2, perf_year, driver_wide)
+
+    if not st.session_state.mapping_df.empty:
+        perf2=add_bridge_columns(perf2,st.session_state.mapping_df)
     master=master_dataset(perf2,payout,value,perf_year,payout_year,value_year)
     return perf2,payout,value,master,perf_year,payout_year,value_year
 
@@ -1298,7 +1345,11 @@ if page=="5. Build Metric Objects":
     if not st.session_state.driver_summary_df.empty:
         st.info("Management value driver evidence is loaded and will be used in Evidence Engine scoring.")
     perf2,payout,value,master,perf_year,payout_year,value_year=build_context()
-    with st.expander("Merged performance dataset"): st.dataframe(perf2,use_container_width=True)
+    with st.expander("Merged performance dataset"):
+        st.dataframe(perf2,use_container_width=True)
+    bridge_cols=[c for c in ["Pricing","Volume/Mix","Inflation","Foreign Exchange","Productivity","Other","Operating Income"] if c in perf2.columns]
+    if bridge_cols:
+        st.success("Bridge / operating metrics available for analysis: " + ", ".join(bridge_cols))
     objs=build_metric_objects(perf2,st.session_state.mapping_df)
     objs=st.data_editor(objs,use_container_width=True,num_rows="dynamic",key="metric_objects_editor")
     st.session_state.metric_objects=objs; st.session_state.master_df=master
