@@ -1133,6 +1133,335 @@ def build_recommendation_narrative(company, candidate_objects, recommended_plan)
 
 
 
+
+# --------------------------------------------------------------------
+# Recommendation Workspace Override
+# Fixes contradictory recommendations:
+# - Top alternative must be a plan-eligible tested alternative, not just the highest non-current row.
+# - Initial recommended plan must include a real alternative when one improves on current plan.
+# - Do not generate a one-metric 100% plan unless only one metric is available.
+# --------------------------------------------------------------------
+
+def _numeric_value(row, col, default=np.nan):
+    try:
+        val = row.get(col, default)
+        return float(val) if pd.notna(val) else default
+    except Exception:
+        return default
+
+def _is_quantitatively_tested(row):
+    for col in ["Directional Corr.", "Lagged Corr.", "Rolling 3Y Corr.", "Payout Corr."]:
+        if col in row and pd.notna(row[col]):
+            return True
+    return False
+
+def classify_metric_readiness(row):
+    if _is_quantitatively_tested(row):
+        return "Ready"
+    if row.get("Driver Evidence Score", 0) >= 50 or row.get("Management Score", 0) >= 70:
+        return "Needs annual values"
+    return "Review"
+
+def build_candidate_metric_objects(score_df, current_metrics):
+    """
+    Candidate Metric Object model:
+    every current metric, Capital IQ metric, and management driver is placed into
+    one evidence framework. This version separates:
+    - evidence score
+    - plan eligibility
+    - recommendation action
+    so the workspace does not contradict itself.
+    """
+    if score_df is None or score_df.empty:
+        return pd.DataFrame()
+
+    df = build_recommendation_universe(score_df, current_metrics, st.session_state.driver_linkage_df).copy()
+    current_set = {str(x) for x in current_metrics or []}
+    current_avg = df[df["Metric"].astype(str).isin(current_set)]["Evidence Score"].mean()
+    if pd.isna(current_avg):
+        current_avg = df["Evidence Score"].mean()
+
+    df["Current Plan Metric"] = df["Metric"].astype(str).isin(current_set)
+    df["Improvement vs Current Avg"] = df["Evidence Score"] - current_avg
+    df["Readiness"] = df.apply(classify_metric_readiness, axis=1)
+
+    def role(row):
+        cat = str(row.get("Category", ""))
+        metric = str(row.get("Metric", "")).lower()
+        if "capital" in cat.lower() or "roic" in metric:
+            return "Capital discipline"
+        if "cash" in cat.lower() or "cash" in metric or "fcf" in metric:
+            return "Cash generation"
+        if "profit" in cat.lower() or "ebitda" in metric or "margin" in metric or "operating income" in metric:
+            return "Profitability"
+        if "growth" in cat.lower() or "revenue" in metric or "sales" in metric:
+            return "Growth"
+        if "commercial" in cat.lower() or "pricing" in metric or "volume" in metric or "foreign exchange" in metric:
+            return "Commercial execution"
+        if "operations" in cat.lower() or "productivity" in metric or "cost" in metric or "inflation" in metric:
+            return "Operational execution"
+        return "Other"
+
+    def evidence_bucket(row):
+        parts = []
+        if _is_quantitatively_tested(row):
+            parts.append("Financial")
+        if row.get("Management Score", 0) > 0:
+            parts.append("Management")
+        if row.get("Driver Evidence Score", 0) > 0:
+            parts.append("Driver")
+        if row.get("Design Fit", 0) > 0:
+            parts.append("Design")
+        return " + ".join(parts) if parts else "Limited"
+
+    def plan_eligible(row):
+        if row.get("Current Plan Metric", False):
+            return True
+        if row.get("Readiness") != "Ready":
+            return False
+        # A metric can be tested in an alternative if it improves on current or is close enough
+        # to merit consultant review. This prevents arbitrary high thresholds from suppressing
+        # useful alternatives such as Revenue in small samples.
+        return row.get("Improvement vs Current Avg", -999) >= 0
+
+    def action(row):
+        if row.get("Current Plan Metric", False):
+            return "Current plan metric"
+        if row.get("Readiness") == "Needs annual values":
+            return "Collect annual values"
+        if row.get("Readiness") != "Ready":
+            return "Background evidence"
+        improvement = row.get("Improvement vs Current Avg", 0)
+        score = row.get("Evidence Score", 0)
+        if improvement >= 5:
+            return "Add / test in plan"
+        if improvement >= 0:
+            return "Consider in alternative"
+        if score >= current_avg - 2:
+            return "Monitor"
+        return "Lower priority"
+
+    def recommendation(row):
+        if row.get("Current Plan Metric", False):
+            return "Current metric"
+        if row.get("Readiness") == "Needs annual values":
+            return "Strategic driver; needs more data"
+        if row.get("Readiness") != "Ready":
+            return "Lower priority"
+        improvement = row.get("Improvement vs Current Avg", 0)
+        if improvement >= 5:
+            return "Strong candidate"
+        if improvement >= 0:
+            return "Consider"
+        return "Lower priority"
+
+    def why(row):
+        reasons = []
+        improvement = row.get("Improvement vs Current Avg", np.nan)
+        if row.get("Current Plan Metric", False):
+            reasons.append("current plan continuity")
+        if pd.notna(improvement) and not row.get("Current Plan Metric", False):
+            if improvement > 0:
+                reasons.append(f"{improvement:+.1f} evidence-score improvement versus current-plan average")
+            else:
+                reasons.append(f"{improvement:+.1f} evidence-score difference versus current-plan average")
+        if pd.notna(row.get("Directional Corr.", np.nan)) and abs(row.get("Directional Corr.", 0)) >= 0.50:
+            reasons.append("shareholder-value relationship")
+        if pd.notna(row.get("Lagged Corr.", np.nan)) and abs(row.get("Lagged Corr.", 0)) >= 0.50:
+            reasons.append("lagged relationship")
+        if row.get("Management Score", 0) >= 70:
+            reasons.append("management emphasis")
+        if row.get("Driver Evidence Score", 0) >= 50:
+            reasons.append("linked to recurring management value drivers")
+        return "; ".join(reasons) if reasons else "included for consultant review"
+
+    df["Portfolio Role"] = df.apply(role, axis=1)
+    df["Evidence Sources"] = df.apply(evidence_bucket, axis=1)
+    df["Plan Eligible"] = df.apply(plan_eligible, axis=1)
+    df["Recommended Action"] = df.apply(action, axis=1)
+    df["Recommendation"] = df.apply(recommendation, axis=1)
+    df["Why It Matters"] = df.apply(why, axis=1)
+    df["Data Status"] = np.where(df["Readiness"].eq("Ready"), "Quantitatively tested", "Strategic evidence only")
+
+    cols = [
+        "Metric", "Category", "Portfolio Role", "Current Plan Metric", "Plan Eligible",
+        "Recommendation", "Recommended Action", "Readiness", "Confidence",
+        "Evidence Score", "Improvement vs Current Avg", "Evidence Sources",
+        "Why It Matters", "Directional Corr.", "Lagged Corr.", "Rolling 3Y Corr.",
+        "Payout Corr.", "Management Score", "Driver Evidence Score", "Design Fit",
+        "Data Status"
+    ]
+    cols = [c for c in cols if c in df.columns]
+    return df[cols].sort_values(["Current Plan Metric", "Plan Eligible", "Evidence Score"], ascending=[True, False, False])
+
+def build_recommended_plan(candidate_objects, current_metrics, max_metrics=4):
+    """
+    Creates a non-contradictory starting recommendation.
+    Rule:
+    - Keep current-plan continuity metrics when available.
+    - Include at least one positive-improvement tested alternative when one exists.
+    - Do not show a one-metric 100% design unless there is literally only one eligible metric.
+    """
+    if candidate_objects is None or candidate_objects.empty:
+        return pd.DataFrame()
+
+    current = candidate_objects[candidate_objects["Current Plan Metric"] == True].copy()
+    alternatives = candidate_objects[
+        (candidate_objects["Current Plan Metric"] == False) &
+        (candidate_objects["Readiness"] == "Ready") &
+        (candidate_objects["Improvement vs Current Avg"] >= 0)
+    ].copy().sort_values(["Improvement vs Current Avg", "Evidence Score"], ascending=[False, False])
+
+    rows = []
+    existing = set()
+
+    # Include up to two current plan metrics for continuity, not just one.
+    if not current.empty:
+        for _, r in current.sort_values("Evidence Score", ascending=False).head(2).iterrows():
+            rows.append({
+                "Metric": r["Metric"],
+                "Role": r.get("Portfolio Role", ""),
+                "Reason": "Current plan continuity; retained for comparison and potential transition design.",
+                "Evidence Score": r["Evidence Score"],
+                "Confidence": r.get("Confidence", ""),
+                "Recommendation": "Retain / review",
+                "Improvement vs Current Avg": r.get("Improvement vs Current Avg", 0),
+                "Current Plan Metric": True
+            })
+            existing.add(r["Metric"])
+
+    # Add positive-improvement alternatives.
+    for _, r in alternatives.iterrows():
+        if len(rows) >= max_metrics:
+            break
+        if r["Metric"] in existing:
+            continue
+        rows.append({
+            "Metric": r["Metric"],
+            "Role": r.get("Portfolio Role", ""),
+            "Reason": r.get("Why It Matters", "Positive tested alternative."),
+            "Evidence Score": r["Evidence Score"],
+            "Confidence": r.get("Confidence", ""),
+            "Recommendation": r.get("Recommended Action", ""),
+            "Improvement vs Current Avg": r.get("Improvement vs Current Avg", np.nan),
+            "Current Plan Metric": False
+        })
+        existing.add(r["Metric"])
+
+    # If there are no positive alternatives, show a current-plan review instead of pretending
+    # an alternative plan exists.
+    if not rows:
+        return pd.DataFrame()
+
+    plan = pd.DataFrame(rows)
+
+    # If plan has only one current metric but eligible alternatives exist, force the top one in.
+    if len(plan) == 1 and not alternatives.empty and bool(plan.iloc[0]["Current Plan Metric"]):
+        r = alternatives.iloc[0]
+        if r["Metric"] not in existing:
+            plan = pd.concat([plan, pd.DataFrame([{
+                "Metric": r["Metric"],
+                "Role": r.get("Portfolio Role", ""),
+                "Reason": r.get("Why It Matters", "Positive tested alternative."),
+                "Evidence Score": r["Evidence Score"],
+                "Confidence": r.get("Confidence", ""),
+                "Recommendation": r.get("Recommended Action", ""),
+                "Improvement vs Current Avg": r.get("Improvement vs Current Avg", np.nan),
+                "Current Plan Metric": False
+            }])], ignore_index=True)
+
+    n = len(plan)
+    if n == 1:
+        weights = [100]
+    elif n == 2:
+        weights = [50, 50]
+    elif n == 3:
+        weights = [40, 30, 30]
+    elif n == 4:
+        weights = [30, 25, 25, 20]
+    else:
+        base = int(100 / n)
+        weights = [base] * n
+        weights[0] += 100 - sum(weights)
+
+    plan["Suggested Weight"] = weights[:len(plan)]
+    plan["Weighted Evidence"] = plan["Evidence Score"] * plan["Suggested Weight"] / 100
+    return plan
+
+def build_executive_assessment(candidate_objects, recommended_plan):
+    if candidate_objects is None or candidate_objects.empty:
+        return {
+            "current_score": np.nan,
+            "best_candidate": "n/a",
+            "strong_count": 0,
+            "needs_data": 0,
+            "recommended_plan_score": np.nan,
+        }
+
+    current = candidate_objects[candidate_objects["Current Plan Metric"] == True]
+    current_score = current["Evidence Score"].mean() if not current.empty else np.nan
+
+    eligible = candidate_objects[
+        (candidate_objects["Current Plan Metric"] == False) &
+        (candidate_objects["Readiness"] == "Ready")
+    ].copy()
+    if not eligible.empty:
+        eligible = eligible.sort_values(["Improvement vs Current Avg", "Evidence Score"], ascending=[False, False])
+        best_candidate = eligible.iloc[0]["Metric"]
+    else:
+        best_candidate = "n/a"
+
+    strong_count = int(candidate_objects["Recommended Action"].isin(["Add / test in plan", "Consider in alternative"]).sum())
+    needs_data = int((candidate_objects["Readiness"] == "Needs annual values").sum())
+    rec_score = recommended_plan["Weighted Evidence"].sum() if recommended_plan is not None and not recommended_plan.empty else np.nan
+    return {
+        "current_score": current_score,
+        "best_candidate": best_candidate,
+        "strong_count": strong_count,
+        "needs_data": needs_data,
+        "recommended_plan_score": rec_score,
+    }
+
+def build_recommendation_narrative(company, candidate_objects, recommended_plan):
+    if candidate_objects is None or candidate_objects.empty:
+        return "No recommendation narrative is available yet."
+
+    assessment = build_executive_assessment(candidate_objects, recommended_plan)
+    current_score = assessment["current_score"]
+    rec_score = assessment["recommended_plan_score"]
+    best_candidate = assessment["best_candidate"]
+
+    plan_metrics = ", ".join(recommended_plan["Metric"].astype(str).tolist()) if recommended_plan is not None and not recommended_plan.empty else "not yet available"
+
+    alt_count = 0
+    if recommended_plan is not None and not recommended_plan.empty and "Current Plan Metric" in recommended_plan.columns:
+        alt_count = int((recommended_plan["Current Plan Metric"] == False).sum())
+
+    lines = [f"{company} Recommendation Workspace", ""]
+    if pd.notna(current_score):
+        lines.append(f"The current plan has an average evidence score of {current_score:.1f}/100.")
+    if best_candidate != "n/a":
+        lines.append(f"The strongest tested alternative currently surfaced by the evidence model is {best_candidate}.")
+    if pd.notna(rec_score):
+        if alt_count > 0:
+            delta = rec_score - current_score if pd.notna(current_score) else np.nan
+            if pd.notna(delta):
+                lines.append(f"The initial alternative design has an evidence score of {rec_score:.1f}/100, representing a {delta:+.1f} point change versus the current plan average.")
+            else:
+                lines.append(f"The initial alternative design has an evidence score of {rec_score:.1f}/100.")
+        else:
+            lines.append(f"The system did not identify a tested alternative that clearly improves the current-plan evidence score. The displayed plan should be treated as current-plan review, not a new recommendation.")
+    lines.append(f"The initial design includes: {plan_metrics}.")
+
+    if "driver_summary_df" in st.session_state and not st.session_state.driver_summary_df.empty:
+        top_drivers = ", ".join(st.session_state.driver_summary_df.head(4)["Driver"].astype(str).tolist())
+        lines.append(f"Management value-driver evidence highlights {top_drivers}, which should inform metric selection and the committee narrative.")
+
+    lines.append("")
+    lines.append("Recommendations are directional and should be reviewed with consultant judgment, particularly where annual data is incomplete or where metrics overlap.")
+    return "\n".join(lines)
+
+
 def infer_current_plan_defaults(perf_df, perf_year, ready_metrics):
     """
     Current incentive metrics should come from the original uploaded performance/current-plan file,
@@ -1500,7 +1829,7 @@ elif page=="7. Design Lab":
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Current Plan Score", "n/a" if pd.isna(assessment["current_score"]) else f"{assessment['current_score']:.1f}/100")
     k2.metric("Recommended Plan Score", "n/a" if pd.isna(assessment["recommended_plan_score"]) else f"{assessment['recommended_plan_score']:.1f}/100")
-    k3.metric("Best Alternative", assessment["best_candidate"])
+    k3.metric("Top Tested Alternative", assessment["best_candidate"])
     k4.metric("Metrics Needing Data", assessment["needs_data"])
 
     narrative = build_recommendation_narrative(company, candidate_objects, recommended_plan)
@@ -1519,13 +1848,15 @@ elif page=="7. Design Lab":
     st.dataframe(candidates, use_container_width=True)
     download_df(candidate_objects, "Download candidate metric objects", "candidate_metric_objects.csv")
 
-    st.subheader("Initial Recommended Plan")
+    st.subheader("Initial Design Recommendation")
     st.caption("The system proposes a starting point. The consultant should edit it based on context, strategy, and committee judgment.")
     if recommended_plan.empty:
-        st.warning("No recommended plan could be generated.")
+        st.warning("No design recommendation could be generated from the current scored metrics.")
     else:
+        if "Current Plan Metric" in recommended_plan.columns and int((recommended_plan["Current Plan Metric"] == False).sum()) == 0:
+            st.warning("The initial design contains only current-plan metrics because no tested alternative improved on the current-plan average. Treat this as a current-plan review, not an alternative recommendation.")
         st.dataframe(recommended_plan, use_container_width=True)
-        st.metric("Initial Recommended Plan Evidence Score", f"{recommended_plan['Weighted Evidence'].sum():.1f}/100")
+        st.metric("Initial Design Evidence Score", f"{recommended_plan['Weighted Evidence'].sum():.1f}/100")
         st.plotly_chart(px.bar(recommended_plan, x="Metric", y="Suggested Weight", title="Initial recommended weights"), use_container_width=True)
         download_df(recommended_plan, "Download recommended plan", "recommended_plan.csv")
 
